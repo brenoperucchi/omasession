@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# One-time setup so Chromium-family browsers can restore a session unattended.
+# Belongs in the plugin's install step, not in the restore path: it needs root
+# and it only has to happen once per machine.
+#
+# What it fixes: Google Chrome replaces session restore with its onboarding
+# pages ("What's New", default-browser prompt) on the first launch after every
+# version milestone -- and Chrome updates itself. Without this, the first
+# restore after each Chrome update silently loses every browser window.
+# Chromium does not do this, but the policy is harmless there.
+
+set -euo pipefail
+
+# RestoreOnStartup=1 ("restore the last session") has to come from a policy,
+# not from the profile: Chrome protects that preference with an HMAC in
+# Secure Preferences and silently ignores a value edited into Preferences by
+# hand. That is why forging it worked only after a hard kill -- crash recovery
+# takes a different path -- and never survived a clean reboot.
+POLICY='{"RestoreOnStartup": 1, "PromotionalTabsEnabled": false, "DefaultBrowserSettingEnabled": false}'
+
+# Each vendor reads its own policy directory; writing to all present ones is
+# cheaper than detecting which browser the user will install next.
+declare -A POLICY_DIRS=(
+    [google-chrome]=/etc/opt/chrome/policies/managed
+    [chromium]=/etc/chromium/policies/managed
+    [brave]=/etc/brave/policies/managed
+    [vivaldi]=/etc/vivaldi/policies/managed
+    [edge]=/etc/opt/edge/policies/managed
+)
+
+declare -A BINARIES=(
+    [google-chrome]=google-chrome-stable
+    [chromium]=chromium
+    [brave]=brave
+    [vivaldi]=vivaldi-stable
+    [edge]=microsoft-edge-stable
+)
+
+die() { printf 'browser-setup: %s\n' "$*" >&2; exit 1; }
+
+(( EUID == 0 )) || die "needs root to write policy files (run with sudo)"
+
+installed=0
+for vendor in "${!POLICY_DIRS[@]}"; do
+    command -v "${BINARIES[$vendor]}" >/dev/null 2>&1 || continue
+    dir="${POLICY_DIRS[$vendor]}"
+    mkdir -p "$dir"
+    printf '%s\n' "$POLICY" > "$dir/omasession-no-promo.json"
+    chmod 644 "$dir/omasession-no-promo.json"
+    printf 'browser-setup: %s → %s/omasession-no-promo.json\n' "$vendor" "$dir"
+    installed=$((installed + 1))
+done
+
+if (( installed == 0 )); then
+    echo "browser-setup: no Chromium-family browser found; nothing to do"
+else
+    echo "browser-setup: $installed browser(s) configured"
+fi

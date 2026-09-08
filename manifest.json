@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "id": "brenoperucchi.omasession",
+  "name": "OmaSession",
+  "version": "0.1.0",
+  "author": "brenoperucchi",
+  "license": "MIT",
+  "description": "Reopens the windows you had open, on the workspaces they were on, after a reboot or a crash -- speaking the Lua IPC that Hyprland 0.56 actually accepts.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaSession",
+    "description": "Session state: what was captured, when, and what came back",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "saveIntervalSec": 30,
+      "restoreOnLogin": true,
+      "browserRestore": true
+    },
+    "schema": [
+      {
+        "key": "saveIntervalSec",
+        "type": "integer",
+        "label": "Snapshot interval (seconds)",
+        "description": "How stale the session may be after a power loss. hyprresume defaults to 120; a crash-prone machine wants less.",
+        "min": 10,
+        "max": 3600,
+        "step": 10,
+        "defaultValue": 30
+      },
+      {
+        "key": "restoreOnLogin",
+        "type": "boolean",
+        "label": "Restore the session on login",
+        "defaultValue": true
+      },
+      {
+        "key": "browserRestore",
+        "type": "boolean",
+        "label": "Let browsers reopen their own tabs",
+        "description": "Launches the browser once and places the windows it reopens. Off means empty windows on the right workspaces.",
+        "defaultValue": true
+      }
+    ]
+  }
+}
