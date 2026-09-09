@@ -1,7 +1,12 @@
 # 001 — Pre-shutdown hook: make browsers persist before the session dies
 
-**Status:** open. This is the last gap between "windows come back" and the
-macOS-parity the project is for.
+**Status:** FECHADO em 2026-09-08 — o diagnóstico abaixo estava errado e o hook
+é desnecessário. Ver `001-RESULTADO.md`. Nada se perde no shutdown: o arquivo de
+sessão atravessa o reboot intacto, e o que bloqueia o restore é
+`profile.exit_type = "Crashed"`, que `arm_browser_profile()` já corrige. O
+documento abaixo é preservado como registro da investigação — a medição que o
+originou (`grep` sobre `Sessions/` depois do relaunch) mediu o arquivo já
+rotacionado.
 
 ## The observation
 

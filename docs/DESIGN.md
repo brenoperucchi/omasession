@@ -66,8 +66,17 @@ Two failure modes of hyprresume that this plugin must not inherit:
 2. **A failed restore destroys the saved session.** With `restore_on_start` and
    a 120s autosave, the daemon starts, restores nothing, and two minutes later
    writes the empty desktop over a good `last.toml`. A real 6-window session
-   was lost this way during testing. **Never overwrite a non-empty session with
-   an empty one** (`session-save.sh` refuses).
+   was lost this way during testing.
+
+   The invariant this forces is not "never save an empty desktop" — measured on
+   2026-09-08, hyprresume's own daemon replaced a five-window `last.toml` with a
+   one-window one, and left it beside a five-window sidecar. Nothing was zero
+   and the session was still ruined. What `session-save.sh` enforces is **never
+   replace a saved session with a worse one, and never move one file of the pair
+   without the other**: it backs both up, lets hyprresume write, validates what
+   came out against the screen it was taken from, and rolls both back if the
+   result is empty, smaller than the screen, or not parseable. `test/guard-cases.sh`
+   holds the cases.
 
 ## 3. The Hyprland 0.56 Lua IPC
 
