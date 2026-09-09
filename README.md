@@ -9,8 +9,10 @@ Omarchy 4.
 
 > **Status: not usable yet.** The replay engine and the save guard are built and
 > measured; the CLI, the systemd units and the panel's data source are not. The
-> bar widget you see above renders **fabricated data** from a `mock` block, not
-> your session — it is not yet wired to the CLI that now exists. From a terminal
+> bar widget you see above renders **fabricated data** from a `mock` block. Its
+> data contract is real and produced by `omasession status --json` — including
+> which windows the restore can actually bring back, read from the same session
+> file the restore reads — but the QML is not yet reading it. From a terminal
 > the save/restore/status path does work; see
 > [Where it actually is](#where-it-actually-is).
 

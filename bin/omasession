@@ -162,7 +162,7 @@ status_json() {
     # live process, because the saved session describes windows already gone.
     local captured='[]'
     if [[ -f "$sidecar" ]]; then
-        captured="$(python3 "$LIB/captured.py" "$sidecar" 2>/dev/null || echo '[]')"
+        captured="$(python3 "$LIB/captured.py" "$sidecar" "$toml" 2>/dev/null || echo '[]')"
     fi
 
     workspaces="$(jq -c '[.[].ws] | unique | length' <<<"$captured" 2>/dev/null || echo 0)"
