@@ -259,7 +259,8 @@ cmd_resolve() {
     out="$(hyprctl clients -j | python3 "$LIB/resolve_cli.py")" || die "resolve failed"
     if (( json )); then printf '%s\n' "$out"; return; fi
 
-    jq -r '.[] | "  \(.via | . + (" " * (10 - length)))  \(.class)"' <<<"$out"
+    jq -r '.[] | "  \(.via | . + (" " * (10 - length)))  \(.class)"
+             + (if .ambiguous then "   (ambiguous: \(.ambiguous | length) other .desktop entry claims this class)" else "" end)' <<<"$out"
     local total resolved
     total="$(jq 'length' <<<"$out")"
     resolved="$(jq '[.[] | select(.argv != null)] | length' <<<"$out")"

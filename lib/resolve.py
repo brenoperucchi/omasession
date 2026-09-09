@@ -109,15 +109,35 @@ def parse_desktop(path: Path) -> dict | None:
     return entry
 
 
+# Quem reivindica uma classe, e com que autoridade. StartupWMClass é a entrada
+# declarando "as janelas com esta classe são minhas"; o nome do arquivo apenas
+# coincide com ela. Uma reivindicação declarada vence uma coincidência.
+CLAIM_DECLARED, CLAIM_FILENAME = 2, 1
+
+
 def desktop_index() -> dict[str, dict]:
     """Map lowercased class names to desktop entries.
 
     Two keys per entry, because neither alone is reliable: StartupWMClass is
     authoritative when present but most entries omit it, and the entry id
     matches the class for the majority that do.
+
+    Precedence used to be "whichever file was read first", which is not
+    authority -- it is alphabetical order wearing a costume. Now: a declared
+    StartupWMClass beats a filename that merely coincides, and among equals the
+    most specific data directory wins, so a user override in ~/.local/share
+    beats /usr/share.
+
+    Some collisions cannot be resolved from the data at all. On this machine
+    both `com.rtosta.zapzap.desktop` and `com.rtosta.zapzap.nogpu.desktop`
+    declare StartupWMClass=zapzap with different Exec lines, and neither is
+    NoDisplay: there is nothing in the files that says which one owns the
+    window. The pick stays deterministic, and the runners-up are recorded so
+    `omasession resolve` can say the choice was a coin toss rather than present
+    it as a fact.
     """
     index: dict[str, dict] = {}
-    for directory in data_dirs():
+    for depth, directory in enumerate(data_dirs()):
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob("*.desktop")):
@@ -125,13 +145,27 @@ def desktop_index() -> dict[str, dict]:
             if entry is None:
                 continue
             entry["_path"] = str(path)
-            keys = [path.stem]
+            claims = [(path.stem, CLAIM_FILENAME)]
             if entry.get("StartupWMClass"):
-                keys.append(entry["StartupWMClass"])
-            for key in keys:
-                # setdefault: data_dirs() is most-specific-first, so a user
-                # override in ~/.local/share wins over /usr/share.
-                index.setdefault(key.lower(), entry)
+                claims.append((entry["StartupWMClass"], CLAIM_DECLARED))
+            for key, claim in claims:
+                key = key.lower()
+                current = index.get(key)
+                if current is None:
+                    index[key] = dict(entry, _claim=claim, _depth=depth, _rivals=[])
+                    continue
+                mine = (claim, -depth)
+                theirs = (current["_claim"], -current["_depth"])
+                # Rival só é quem empata em autoridade E propõe outro comando.
+                # Uma entrada que perdeu por autoridade não é uma ambiguidade --
+                # é precedência resolvida, e chamá-la de empate transformaria o
+                # caso normal (override do usuário sobre o do sistema) em ruído.
+                tie = mine == theirs and entry["Exec"] != current["Exec"]
+                if mine > theirs:
+                    index[key] = dict(entry, _claim=claim, _depth=depth,
+                                      _rivals=current["_rivals"])
+                elif tie:
+                    current["_rivals"] = current["_rivals"] + [entry["Exec"]]
     return index
 
 
@@ -210,11 +244,22 @@ def child_cwd(pid: int) -> tuple[str | None, str]:
     tmux server, in another tree. Restoring those windows to $HOME would look
     like a success.
 
-    So: search descendants for something that is actually a shell, and if all we
-    find is a multiplexer client, say the cwd is unavailable. An honest "not
-    recovered" beats a confident wrong directory.
+    Nor is "the first thing that looks like a shell" enough, which is what an
+    earlier version did. Two cases make it guess:
+
+      * a terminal process serving more than one window has several sibling
+        shells, in different directories, and a pid alone cannot say which
+        window belongs to which -- so the first one is a coin toss;
+      * a shell whose own child is a multiplexer client is sitting in whatever
+        directory tmux was started from, not in the user's pane.
+
+    Both now return no directory and a reason. An honest "not recovered" beats a
+    confident wrong one: the wrong directory is indistinguishable from success
+    until the user looks at the prompt.
     """
-    seen, queue, saw_mux = set(), [(str(pid), 0)], False
+    candidates: list[tuple[str, str]] = []   # (cwd, comm)
+    saw_mux = False
+    seen, queue = set(), [(str(pid), 0)]
     while queue:
         current, depth = queue.pop(0)
         if current in seen or depth > 3:
@@ -226,11 +271,24 @@ def child_cwd(pid: int) -> tuple[str | None, str]:
                 saw_mux = True
                 continue
             if comm in SHELLS:
+                # Um shell que é pai de um multiplexador está no diretório de
+                # onde o tmux foi lançado, não no painel em que o usuário está.
+                if any(_comm(g) in MULTIPLEXERS for g in _children(kid)):
+                    saw_mux = True
+                    continue
                 try:
-                    return os.readlink(f"/proc/{kid}/cwd"), f"shell: {comm}"
+                    candidates.append((os.readlink(f"/proc/{kid}/cwd"), comm))
                 except OSError:
                     pass
+                continue
             queue.append((kid, depth + 1))
+
+    distinct = {cwd for cwd, _ in candidates}
+    if len(distinct) == 1:
+        return candidates[0][0], f"shell: {candidates[0][1]}"
+    if len(distinct) > 1:
+        return None, (f"{len(distinct)} shells under this terminal; "
+                      f"cannot tell which one is this window")
     if saw_mux:
         return None, "cwd lives in the multiplexer server, not in this tree"
     return None, "no shell found under the terminal"
@@ -261,6 +319,12 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
         result["argv"] = exec_argv(entry["Exec"])
         result["via"] = ".desktop"
         result["note"] = entry["_path"]
+        # Declarar o empate em vez de escondê-lo: relançar pelo comando errado
+        # abre a coisa errada com cara de sucesso.
+        rivals = [r for r in entry.get("_rivals", []) if r != entry["Exec"]]
+        if rivals:
+            result["ambiguous"] = rivals
+            result["note"] += f"  (+{len(rivals)} other entry claims this class)"
 
     if result["argv"] is None and pid:
         argv = from_cgroup(pid)
