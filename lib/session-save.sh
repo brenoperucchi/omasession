@@ -121,12 +121,23 @@ trap cleanup EXIT
 # Varre stagings órfãos de execuções que morreram sem rodar o trap -- SIGKILL e
 # queda de energia não rodam trap nenhum. São inertes (nada os lê), mas
 # acumulariam para sempre, e um diretório cheio de restos esconde o estado real.
-# Só remove os que não pertencem a um processo vivo.
+#
+# `kill -0 $PID` sozinho não basta: o PID codificado no nome do arquivo pode ter
+# sido reciclado por QUALQUER outro processo do sistema entre a morte original e
+# esta varredura -- medido, num teste que mata 8 saves em sequência, sobrando
+# arquivos que `kill -0` via como "vivos" porque o número de PID já pertencia a
+# outra coisa. `/proc/<pid>/comm` não resolve isso: é sempre "bash" para
+# qualquer script bash invocado via `#!/usr/bin/env bash` (confirmado
+# empiricamente -- o kernel/bash setam comm a partir do primeiro argv do exec,
+# que é literalmente "bash", não o nome do arquivo). `/proc/<pid>/cmdline`
+# carrega o caminho completo do script como segundo argumento e é o que de fato
+# distingue esta execução de qualquer outra coisa que tenha herdado o PID.
 for stale in "$SESSION_DIR"/omasession.staging.*; do
     [[ -e "$stale" ]] || continue
-    stale_pid="${stale##*.}"; stale_pid="${stale_pid%%.*}"
     [[ "$stale" =~ \.([0-9]+)\.(toml|titles\.json)$ ]] || continue
-    kill -0 "${BASH_REMATCH[1]}" 2>/dev/null || rm -f "$stale"
+    pid="${BASH_REMATCH[1]}"
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || echo "")"
+    [[ "$cmdline" == *session-save.sh* ]] || rm -f "$stale"
 done
 
 count_old="$(toml_windows "$TOML")"
