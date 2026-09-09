@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# OmaSession -- reopen the windows you had, where you had them.
+#
+#   omasession save [name]        capture the session (guarded)
+#   omasession restore [name]     replay it into the compositor
+#   omasession status [--json]    what was captured, when, and what is wrong
+#   omasession install            timer, login restore, browser policy, hyprresume
+#   omasession uninstall          undo install
+#
+# Everything heavy lives here rather than in Panel.qml: a crash inside
+# quickshell takes down the bar, the dock and the menu at once, and restoring
+# has to work when there is no shell at all (docs/DESIGN.md §6). The panel only
+# reads `status --json` and calls back into this script.
+
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB="$SELF/lib"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omasession"
+CONFIG="$CONFIG_DIR/config.json"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omasession"
+SAVE_STATE="$STATE_DIR/last-save.json"
+SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/hyprresume/sessions}"
+export OMASESSION_SESSION_DIR="$SESSION_DIR"
+
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/autostart.lua"
+
+say()  { printf 'omasession: %s\n' "$*"; }
+err()  { printf 'omasession: %s\n' "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# ── configuration ────────────────────────────────────────────────────────────
+# The manifest declares these under barWidget.schema, which is the quickshell
+# preference store -- unreachable from a systemd timer or from a login-time
+# restore, which are exactly the two places that need them. So the file below
+# is the source of truth and the panel writes it; the manifest only supplies
+# the defaults a fresh install starts from.
+DEFAULT_SAVE_INTERVAL=30
+DEFAULT_RESTORE_ON_LOGIN=true
+DEFAULT_BROWSER_RESTORE=true
+
+config_get() { # config_get <key> <default>
+    [[ -f "$CONFIG" ]] || { printf '%s' "$2"; return; }
+    local v
+    v="$(jq -r --arg k "$1" '.[$k] // empty' "$CONFIG" 2>/dev/null)" || v=""
+    printf '%s' "${v:-$2}"
+}
+
+# ── hyprland ─────────────────────────────────────────────────────────────────
+hypr_env() {
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then
+        HYPRLAND_INSTANCE_SIGNATURE="$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)"
+        export HYPRLAND_INSTANCE_SIGNATURE
+    fi
+    [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]
+}
+
+# ── the writer we cannot control ─────────────────────────────────────────────
+# hyprresume's own daemon writes the same two files with a 120s autosave and no
+# guard. Our protection is worthless while it runs -- it already replaced a
+# five-window session with a one-window one during development -- and it does
+# not go through us, so the only honest thing is to detect it and say so.
+daemon_pids() { pgrep -x -u "$(id -u)" hyprresume 2>/dev/null || true; }
+
+# ── save ─────────────────────────────────────────────────────────────────────
+cmd_save() {
+    local name="${1:-last}" out rc
+    mkdir -p "$STATE_DIR"
+    set +e
+    out="$("$LIB/session-save.sh" "$name" 2>&1)"; rc=$?
+    set -e
+    printf '%s\n' "$out"
+
+    # Record the outcome so `status` can report a refusal instead of leaving it
+    # in the journal. A guard that protects the session silently looks exactly
+    # like a guard that never ran.
+    local windows=0
+    [[ -f "$SESSION_DIR/$name.toml" ]] && \
+        windows="$(grep -c '^\[\[window\]\]' "$SESSION_DIR/$name.toml" 2>/dev/null || echo 0)"
+    jq -n --arg when "$(date -u +%FT%TZ)" --argjson rc "$rc" \
+          --arg message "$(printf '%s' "$out" | tail -1)" \
+          --argjson windows "$windows" --arg name "$name" \
+          '{when:$when, rc:$rc, message:$message, windows:$windows, name:$name}' \
+        > "$SAVE_STATE.tmp" && mv -f "$SAVE_STATE.tmp" "$SAVE_STATE"
+    return $rc
+}
+
+# ── restore ──────────────────────────────────────────────────────────────────
+cmd_restore() {
+    local name="${1:-last}"
+    hypr_env || die "no Hyprland instance -- nothing to restore into"
+    [[ -f "$SESSION_DIR/$name.toml" ]] || die "no saved session at $SESSION_DIR/$name.toml"
+
+    # browserRestore ainda nao e respeitado: replay.py nao le a opcao. Dizer
+    # isso e melhor que exportar uma variavel que ninguem consome -- uma opcao
+    # que finge funcionar e exatamente o defeito que este projeto existe para
+    # combater.
+    if [[ "$(config_get browserRestore "$DEFAULT_BROWSER_RESTORE")" == "false" ]]; then
+        err "browserRestore=false ainda nao e respeitado; os browsers vao reabrir suas janelas"
+    fi
+    exec python3 "$LIB/replay.py" "$SESSION_DIR/$name.toml"
+}
+
+# ── status ───────────────────────────────────────────────────────────────────
+# The JSON shape is the contract Panel.qml already renders against; keep the
+# keys stable or the panel silently shows nothing.
+status_json() {
+    local name="${1:-last}"
+    local toml="$SESSION_DIR/$name.toml" sidecar="$SESSION_DIR/$name.titles.json"
+
+    local windows=0
+    [[ -f "$toml" ]] && windows="$(grep -c '^\[\[window\]\]' "$toml" 2>/dev/null || echo 0)"
+
+    local captured='[]'
+    if [[ -f "$sidecar" ]]; then
+        captured="$(jq -c '[.windows[]? | {ws: .workspace, cls: .class, title: .title}]' \
+            "$sidecar" 2>/dev/null || echo '[]')"
+    fi
+
+    # Age is measured from the session file, not from our own state file: the
+    # question the user has is "how old is what would be restored", and only the
+    # file that would be restored can answer it.
+    local ago=-1 mtime
+    if [[ -f "$toml" ]] && mtime="$(stat -c %Y "$toml" 2>/dev/null)"; then
+        ago=$(( $(date +%s) - mtime ))
+    fi
+
+    local rc=0 message="" when=""
+    if [[ -f "$SAVE_STATE" ]]; then
+        rc="$(jq -r '.rc // 0' "$SAVE_STATE" 2>/dev/null || echo 0)"
+        message="$(jq -r '.message // ""' "$SAVE_STATE" 2>/dev/null || echo "")"
+        when="$(jq -r '.when // ""' "$SAVE_STATE" 2>/dev/null || echo "")"
+    fi
+    local refused=false
+    [[ "$rc" == "3" ]] && refused=true
+
+    local daemon=false
+    [[ -n "$(daemon_pids)" ]] && daemon=true
+
+    local timer="inactive"
+    systemctl --user is-active --quiet omasession-snapshot.timer 2>/dev/null && timer="active"
+
+    jq -n \
+        --argjson windows "$windows" \
+        --argjson agoSec "$ago" \
+        --argjson refused "$refused" \
+        --arg detail "$( [[ "$refused" == true ]] && printf '%s' "${message#session-save: }" )" \
+        --argjson daemonActive "$daemon" \
+        --argjson captured "$captured" \
+        --arg lastSave "$when" \
+        --arg timer "$timer" \
+        --arg session "$toml" \
+        '{windows:$windows, agoSec:$agoSec, refused:$refused, detail:$detail,
+          daemonActive:$daemonActive, captured:$captured,
+          lastSave:$lastSave, timer:$timer, session:$session}'
+}
+
+cmd_status() {
+    local json=0 name=last
+    for a in "$@"; do
+        case "$a" in
+            --json) json=1 ;;
+            *) name="$a" ;;
+        esac
+    done
+
+    if (( json )); then status_json "$name"; return; fi
+
+    local s; s="$(status_json "$name")"
+    local windows ago refused detail daemon timer
+    windows="$(jq -r .windows <<<"$s")"
+    ago="$(jq -r .agoSec <<<"$s")"
+    refused="$(jq -r .refused <<<"$s")"
+    detail="$(jq -r .detail <<<"$s")"
+    daemon="$(jq -r .daemonActive <<<"$s")"
+    timer="$(jq -r .timer <<<"$s")"
+
+    if (( ago < 0 )); then
+        say "no session saved yet"
+    else
+        local human
+        if   (( ago < 60 ));   then human="just now"
+        elif (( ago < 3600 )); then human="$((ago/60)) min ago"
+        else                        human="$((ago/3600)) h ago"
+        fi
+        say "$windows window(s) captured, $human"
+    fi
+    [[ "$timer" == active ]] || err "snapshot timer is not running (omasession install)"
+    [[ "$refused" == false ]] || err "last save refused -- session preserved: $detail"
+    [[ "$daemon" == false ]] || err "hyprresume's daemon is running and writes the same files; it defeats the save guard (omasession install disarms it)"
+    jq -r '.captured[]? | "  ws\(.ws)  \(.cls)  \(.title)"' <<<"$s"
+}
+
+# ── install ──────────────────────────────────────────────────────────────────
+write_units() {
+    mkdir -p "$UNIT_DIR"
+    local interval; interval="$(config_get saveIntervalSec "$DEFAULT_SAVE_INTERVAL")"
+
+    cat > "$UNIT_DIR/omasession-snapshot.service" <<UNIT
+[Unit]
+Description=OmaSession session snapshot
+# Only meaningful while a graphical session exists; without this the timer keeps
+# firing after logout and every run is a refusal against an empty screen.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=$SELF/bin/omasession save
+# The guard reports 3 when it refuses and 4 when another save holds the lock.
+# Both are correct outcomes, not failures: without this systemd marks the unit
+# failed and the user is told something broke when nothing did.
+SuccessExitStatus=3 4
+UNIT
+
+    cat > "$UNIT_DIR/omasession-snapshot.timer" <<UNIT
+[Unit]
+Description=OmaSession session snapshot
+PartOf=graphical-session.target
+
+[Timer]
+OnActiveSec=${interval}s
+OnUnitActiveSec=${interval}s
+AccuracySec=1s
+
+[Install]
+WantedBy=graphical-session.target
+UNIT
+    say "units written to $UNIT_DIR (every ${interval}s)"
+}
+
+autostart_line() { printf 'o.launch_on_start("%s/bin/omasession restore")' "$SELF"; }
+
+# Um unico backup, tirado antes da primeira modificacao e nunca sobrescrito.
+# A versao anterior fazia `cp` em dois lugares: o segundo salvava o arquivo JA
+# modificado pelo primeiro, e o uninstall entao "restaurava" um autostart.lua
+# que continuava com o hyprresume desarmado -- anunciando um desfazer que nao
+# desfazia. Medido no guest: apos install+uninstall a linha do hyprresume
+# seguia comentada.
+backup_autostart() {
+    [[ -f "$AUTOSTART" ]] || return 0
+    [[ -f "$AUTOSTART.omasession.bak" ]] || cp -p "$AUTOSTART" "$AUTOSTART.omasession.bak"
+}
+
+add_login_restore() {
+    [[ -f "$AUTOSTART" ]] || { err "no $AUTOSTART -- skipping login restore"; return; }
+    if grep -qF "omasession restore" "$AUTOSTART"; then
+        say "login restore already in autostart.lua"
+        return
+    fi
+    backup_autostart
+    printf '\n-- OmaSession: reopen the last session at login\n%s\n' "$(autostart_line)" >> "$AUTOSTART"
+    say "login restore added to autostart.lua (backup: $(basename "$AUTOSTART").omasession.bak)"
+}
+
+disarm_hyprresume() {
+    local acted=0
+    if [[ -f "$AUTOSTART" ]] && grep -qE '^[^-]*o\.launch_on_start\("hyprresume"\)' "$AUTOSTART"; then
+        backup_autostart
+        sed -i 's|^\([^-]*o\.launch_on_start("hyprresume")\)|-- omasession: disarmed, see docs/DESIGN.md §2 -- \1|' "$AUTOSTART"
+        acted=1
+    fi
+    local pids; pids="$(daemon_pids)"
+    if [[ -n "$pids" ]]; then
+        # Resolved PIDs, signalled individually. Never `pkill -f hyprresume`:
+        # the pattern matches this script's own command line and kills the
+        # session running it -- that mistake invalidated two measurements.
+        kill -TERM $pids 2>/dev/null || true
+        acted=1
+    fi
+    (( acted )) && say "hyprresume daemon disarmed (it autosaves over the same files, with no guard)" || true
+}
+
+cmd_install() {
+    command -v jq >/dev/null || die "jq is required"
+    command -v python3 >/dev/null || die "python3 is required"
+    command -v hyprresume >/dev/null || err "hyprresume not found -- 'save' needs it (see docs/DESIGN.md §2)"
+
+    mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$SESSION_DIR"
+    if [[ ! -f "$CONFIG" ]]; then
+        jq -n --argjson i "$DEFAULT_SAVE_INTERVAL" \
+              --argjson r "$DEFAULT_RESTORE_ON_LOGIN" \
+              --argjson b "$DEFAULT_BROWSER_RESTORE" \
+              '{saveIntervalSec:$i, restoreOnLogin:$r, browserRestore:$b}' > "$CONFIG"
+        say "config written to $CONFIG"
+    fi
+
+    disarm_hyprresume
+    write_units
+    systemctl --user daemon-reload
+    systemctl --user enable --now omasession-snapshot.timer >/dev/null 2>&1 \
+        && say "snapshot timer enabled" \
+        || err "could not enable the timer (no systemd user session?)"
+
+    [[ "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" == "false" ]] || add_login_restore
+
+    if [[ ! -f /etc/chromium/policies/managed/omasession-no-promo.json \
+       && ! -f /etc/opt/chrome/policies/managed/omasession-no-promo.json ]]; then
+        err "browser policy not installed -- run: sudo $SELF/bin/browser-setup"
+    fi
+    say "installed"
+}
+
+cmd_uninstall() {
+    systemctl --user disable --now omasession-snapshot.timer >/dev/null 2>&1 || true
+    rm -f "$UNIT_DIR/omasession-snapshot.timer" "$UNIT_DIR/omasession-snapshot.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    if [[ -f "$AUTOSTART.omasession.bak" ]]; then
+        mv -f "$AUTOSTART.omasession.bak" "$AUTOSTART"
+        say "autostart.lua restored -- login restore removed and hyprresume re-armed"
+    fi
+    say "uninstalled -- saved sessions in $SESSION_DIR were left alone"
+}
+
+usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-}" in
+    save)      shift; cmd_save "$@" ;;
+    restore)   shift; cmd_restore "$@" ;;
+    status)    shift; cmd_status "$@" ;;
+    install)   shift; cmd_install "$@" ;;
+    uninstall) shift; cmd_uninstall "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) err "unknown command: $1"; usage; exit 1 ;;
+esac

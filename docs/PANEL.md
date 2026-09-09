@@ -85,8 +85,9 @@ Ficam registradas porque nenhuma dá erro visível — dão layout errado em sil
 - Ligar em `omasession status --json` (`mockMode: false`).
 - Os botões só fazem `console.log`. Devem chamar o CLI, nunca salvar ou
   replayar de dentro do QML (`docs/DESIGN.md` §6).
-- Decidir onde a configuração mora: `manifest.json` declara `saveIntervalSec`,
-  `restoreOnLogin` e `browserRestore` sob `barWidget.schema`, ou seja, no store
-  do quickshell — mas quem precisa deles é o timer do systemd e o replay, que
-  rodam quando não há shell. Falta a ponte (provavelmente
-  `~/.config/omasession/config.json`), e ela muda a forma do CLI.
+- ~~Decidir onde a configuração mora.~~ **Decidido:**
+  `~/.config/omasession/config.json` é a fonte de verdade, lida pelo CLI e pelas
+  units; o `manifest.json` só fornece os defaults de uma instalação nova. O
+  store de preferências do quickshell não serve porque o timer e o restore de
+  login rodam justamente quando não há shell. O painel passa a *escrever* esse
+  arquivo, não a guardar o valor.

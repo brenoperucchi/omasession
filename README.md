@@ -10,7 +10,8 @@ Omarchy 4.
 > **Status: not usable yet.** The replay engine and the save guard are built and
 > measured; the CLI, the systemd units and the panel's data source are not. The
 > bar widget you see above renders **fabricated data** from a `mock` block, not
-> your session. Don't install this expecting it to restore anything — see
+> your session — it is not yet wired to the CLI that now exists. From a terminal
+> the save/restore/status path does work; see
 > [Where it actually is](#where-it-actually-is).
 
 ## Why a new plugin
@@ -79,9 +80,9 @@ live Hyprland).
 | `lib/session-save.sh` — save + guard | **works**, 16/16 in `test/guard-cases.sh` |
 | `bin/browser-setup` — per-vendor policy | **works** |
 | Browser tab restore | **understood and measured**, not yet wired into the plugin |
-| `Panel.qml` — bar widget | **mockup**: renders real components, fabricated data |
-| `bin/omasession` — CLI (save/restore/status/install) | **not written** |
-| `systemd/` — snapshot timer | **not written** |
+| `bin/omasession` — CLI (save/restore/status/install/uninstall) | **works**, exercised end to end in the lab |
+| `systemd/` snapshot timer | **works**, written and enabled by `omasession install` |
+| `Panel.qml` — bar widget | **mockup**: renders real components, fabricated data. Not yet reading `status --json` |
 
 ## Docs
 
