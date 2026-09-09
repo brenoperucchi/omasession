@@ -1,19 +1,18 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// OmaSession's bar surface -- currently a MOCKUP.
-//
-// Every number below comes from the `mock` block, not from the CLI: this file
-// exists to settle what the panel should say before `bin/omasession` exists to
-// say it. Flip `mockMode` to false once `omasession status --json` lands; the
-// shape of `mock` is the contract that command has to satisfy.
+// OmaSession's bar surface.
 //
 // DESIGN.md §6 applies here first: an error in this file takes down the bar,
 // the dock and the menu at once, and restoring has to work when there is no
-// shell. So the panel only ever reports, and asks the CLI to act -- it never
-// saves or replays anything itself.
+// shell. So the panel only ever reports what `omasession status --json` says,
+// and asks the CLI to act -- it never saves, replays, or writes config.json
+// itself. `mockMode` exists only for `test/shoot.sh`, which cannot rely on a
+// real session existing in the lab guest it screenshots; production always
+// runs with it false, reading the live CLI.
 Panel {
   id: root
   moduleName: "brenoperucchi.omasession"
@@ -27,15 +26,21 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  // ── mock data ────────────────────────────────────────────────────────────
-  // The contract for `omasession status --json`. Three states worth designing
-  // for, switchable by `scenario` while iterating:
+  // ── data source: the real CLI, or a fixed mock for screenshots ────────────
+  // The contract below is `omasession status --json`'s actual shape, not a
+  // guess at it: `real` is populated by parsing that command's output, and
+  // `mock` is kept only because test/shoot.sh needs a session to render that
+  // does not depend on whatever happens to be open in the lab guest at the
+  // time. Three states worth keeping there, switchable by `scenario`:
   //   healthy    a recent snapshot, nothing wrong
   //   refused    the guard blocked a save (exit 3) -- the case that used to
   //              destroy the session silently, so it must be visible
   //   contested  hyprresume's daemon is running, writing the same files
-  property bool mockMode: true
+  property bool mockMode: false
   property string scenario: "healthy"
+
+  readonly property string cliPath:
+    Quickshell.env("HOME") + "/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession"
 
   readonly property var mock: ({
     "healthy": {
@@ -68,7 +73,96 @@ Panel {
     }
   })
 
-  readonly property var status: mock[scenario]
+  // ── real status, from the CLI ─────────────────────────────────────────────
+  property bool cliMissing: false
+  property bool checking: false
+  property string lastError: ""
+  property var realStatus: null
+
+  readonly property var status: mockMode ? mock[scenario] : realStatus
+
+  function refresh() {
+    if (mockMode || checking) return
+    checking = true
+    statusProc.running = true
+  }
+
+  Process {
+    id: statusProc
+    command: [root.cliPath, "status", "--json"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.checking = false
+        var text = String(this.text).trim()
+        if (text === "") return
+        try {
+          root.realStatus = JSON.parse(text)
+          root.cliMissing = false
+          root.lastError = ""
+        } catch (e) {
+          // A CLI that changed shape or printed a stray line is not the same
+          // failure as one that is simply not there -- and binding straight
+          // to a malformed object is how a single bad run turns into a wall
+          // of TypeErrors across every Text below instead of one message here.
+          root.lastError = "status did not return valid JSON"
+        }
+      }
+    }
+    onExited: function(code) {
+      root.checking = false
+      if (code !== 0 && root.realStatus === null) {
+        // exit 127 from the shell (command not found) is the common case on a
+        // machine where `install` never ran; anything else still means the
+        // panel has nothing trustworthy to show, and saying so beats staying
+        // blank with no explanation.
+        root.cliMissing = true
+      }
+    }
+  }
+
+  // Fire-and-forget actions. Each is its own Process because Save and Restore
+  // can be pressed independently and neither should block the other; both
+  // refresh the real status once they exit, whatever the exit code -- the
+  // guard's own refusal message is exactly what the "refused" banner below is
+  // for, so a non-zero exit here is data, not a reason to hide the result.
+  Process {
+    id: saveProc
+    command: [root.cliPath, "save"]
+    onExited: function(code) { root.refresh() }
+  }
+
+  Process {
+    id: restoreProc
+    command: [root.cliPath, "restore"]
+    onExited: function(code) { root.refresh() }
+  }
+
+  Process {
+    id: configProc
+    property string key: ""
+    property string value: ""
+    command: [root.cliPath, "config", "set", key, value]
+    onExited: function(code) { root.refresh() }
+  }
+
+  function setRestoreOnLogin(on) {
+    configProc.key = "restoreOnLogin"
+    configProc.value = on ? "true" : "false"
+    configProc.running = true
+  }
+
+  Component.onCompleted: refresh()
+  // Refreshed on open (the case that matters most: the user is looking right
+  // now) and on a slow timer regardless, so the bar icon's `attention` state
+  // -- visible even with the panel closed -- does not go stale for the whole
+  // interval between two logins.
+  onOpenedChanged: if (root.opened) root.refresh()
+  Timer {
+    interval: Math.max(10, root.intervalSec) * 1000
+    running: !root.mockMode
+    repeat: true
+    onTriggered: root.refresh()
+  }
   readonly property int windowCount:   status ? status.windows : 0
   readonly property int workspaceCount: status ? status.workspaces : 0
   readonly property int intervalSec:   status ? status.intervalSec : 30
@@ -208,7 +302,10 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             checked: root.restoreOnLogin
-            onToggled: console.log("mock: escreveria restoreOnLogin em config.json")
+            onToggled: {
+              if (root.mockMode) return
+              root.setRestoreOnLogin(loginToggle.checked)
+            }
 
             // PanelToolTip é um ToolTip (Popup): não aceita anchors, e se
             // posiciona sozinho quando é filho do item a que pertence. Tentar
@@ -225,11 +322,57 @@ Panel {
           }
         }
 
+        // ── CLI ausente ──────────────────────────────────────────────────
+        // "0 windows come back" com cara de sessão real, quando na verdade o
+        // CLI nem existe, seria pior que dizer nada: pareceria uma sessão
+        // vazia de verdade, não uma instalação incompleta. As duas causas têm
+        // ações diferentes -- rodar install, ou não fazer nada porque não há
+        // sessão mesmo -- e só uma mensagem explícita distingue.
+        Rectangle {
+          visible: !root.mockMode && root.cliMissing
+          width: parent.width
+          height: missingText.implicitHeight + Style.space(12)
+          radius: Style.space(3)
+          color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
+          Text {
+            id: missingText
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.margins: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            wrapMode: Text.WordWrap
+            color: root.fg
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            text: "omasession was not found at " + root.cliPath
+                + " -- install the plugin's CLI, or run `omasession install`."
+          }
+        }
+
+        Rectangle {
+          visible: !root.mockMode && !root.cliMissing && root.lastError !== ""
+          width: parent.width
+          height: errorText.implicitHeight + Style.space(12)
+          radius: Style.space(3)
+          color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
+          Text {
+            id: errorText
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.margins: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            wrapMode: Text.WordWrap
+            color: root.fg
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            text: root.lastError
+          }
+        }
+
         // ── o cartão da sessão salva ─────────────────────────────────────
         // O que estava salvo, quando, e os dois verbos. Os botões levam rótulo:
         // um ícone sozinho na barra é aceitável porque tem tooltip, mas dentro
         // do painel ninguém deveria adivinhar o que "salvar" e "restaurar" são.
         Rectangle {
+          visible: root.mockMode || !root.cliMissing
           width: parent.width
           height: savedCol.implicitHeight + Style.space(18)
           radius: Style.space(4)
@@ -298,12 +441,14 @@ Panel {
               Button {
                 text: "Save now"
                 bordered: true
-                onClicked: console.log("mock: omasession save")
+                enabled: !root.mockMode && !saveProc.running
+                onClicked: saveProc.running = true
               }
               Button {
                 text: "Restore session"
                 bordered: true
-                onClicked: console.log("mock: omasession restore")
+                enabled: !root.mockMode && !restoreProc.running
+                onClicked: restoreProc.running = true
               }
             }
           }
@@ -353,11 +498,11 @@ Panel {
           }
         }
 
-        PanelSeparator { width: parent.width }
+        PanelSeparator { width: parent.width; visible: root.mockMode || !root.cliMissing }
 
         // ── as janelas: monitor -> workspace -> apps ─────────────────────
         Repeater {
-          model: root.byMonitor
+          model: (root.mockMode || !root.cliMissing) ? root.byMonitor : []
 
           Column {
             width: column.width
@@ -446,9 +591,10 @@ Panel {
           }
         }
 
-        PanelSeparator { width: parent.width }
+        PanelSeparator { width: parent.width; visible: root.mockMode || !root.cliMissing }
 
         Text {
+          visible: root.mockMode || !root.cliMissing
           width: parent.width
           wrapMode: Text.WordWrap
           color: root.dim

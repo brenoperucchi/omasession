@@ -1,21 +1,26 @@
 # Panel.qml — estado, e como iterar nele
 
-**Status:** mockup renderizado e validado no Omarchy 4.0.1 do lab em
-2026-09-08. Os dados vêm do bloco `mock` dentro do próprio `Panel.qml`, não do
-CLI — `bin/omasession` ainda não existe.
+**Status:** ligado ao CLI de verdade desde 2026-09-09. `mockMode: false` é o
+default de produção: o painel lê `omasession status --json` por um `Process`
+real, e os botões/toggle chamam `save`/`restore`/`config set` pelo mesmo
+caminho. `mockMode: true` só existe para `test/shoot.sh`, que precisa de um
+cenário fixo para capturar tela — não do que estiver de fato salvo no guest
+naquele instante.
 
 ![estado normal](../screenshots/panel-healthy.png)
 
-Três estados, alternáveis pela propriedade `scenario`:
+Três estados no bloco `mock`, alternáveis pela propriedade `scenario` (só têm
+efeito com `mockMode: true`):
 
 | `scenario` | O que mostra | Por que existe |
 |---|---|---|
-| `healthy` | `6 windows` · `JUST NOW` · badge `on login` | O estado normal |
-| `refused` | banner `partial save blocked: 1 window written, 6 on screen`, badge `refused` | O guard recusando é meia notícia boa (preservou a sessão) e meia ruim (o snapshot está mais velho do que parece). A versão que só escrevia no journal é como uma sessão de 6 janelas se perdeu sem ninguém ver |
+| `healthy` | `All N come back`, sem avisos | O estado normal |
+| `refused` | `N of M come back` em vermelho + banner `partial save blocked: ...` | O guard recusando é meia notícia boa (preservou a sessão) e meia ruim (o snapshot está mais velho do que parece). A versão que só escrevia no journal é como uma sessão se perdeu sem ninguém ver |
 | `contested` | banner sobre o daemon do hyprresume | Se outro processo escreve os mesmos arquivos, nosso guard não protege nada. É a única defesa possível: dizer |
 
-O bloco `mock` **é o contrato** que `omasession status --json` terá de cumprir.
-`mockMode: false` é a graduação, não um descarte.
+O bloco `mock` continua sendo **o contrato**: a forma que `status --json` tem
+de produzir, mantida em sincronia manual com `lib/effective.py` +
+`lib/captured.py`, que são quem de fato a produz agora.
 
 ## O loop de iteração
 
@@ -67,6 +72,15 @@ sinal.
   preso no overlay de lockscreen crashado. Saída:
   `hyprctl eval 'hl.clear_crashed_lockscreen()'` e
   `hyprctl repl 'hl.dispatch(hl.dsp.dpms{state="on"})'`.
+- **`scp arquivo1 dir/ arquivo2 dir/` (num único comando, destino é diretório)
+  não preserva subpasta.** `scp Panel.qml bin/omasession dest:.../plugindir/`
+  copia `bin/omasession` para `.../plugindir/omasession` — achatado, sem o
+  `bin/` — e nunca sobrescreve o `.../plugindir/bin/omasession` de verdade.
+  Medido: o CLI do guest ficou dias atrás do host, o painel carregava sem erro
+  e chamava um binário antigo sem `config set`, e a única pista foi
+  `unknown command: config` no stderr do `Process`. Sempre copiar com o
+  caminho de destino completo e explícito por arquivo quando a origem tem
+  subdiretório.
 
 ## Três APIs que eu tinha suposto errado
 
@@ -80,14 +94,39 @@ Ficam registradas porque nenhuma dá erro visível — dão layout errado em sil
   `title` para `…`. Por isso o detalhe da recusa vive no banner, e o badge só
   diz `refused`.
 
-## Pendente antes de virar o painel real
+## Como a integração real funciona
 
-- Ligar em `omasession status --json` (`mockMode: false`).
-- Os botões só fazem `console.log`. Devem chamar o CLI, nunca salvar ou
-  replayar de dentro do QML (`docs/DESIGN.md` §6).
-- ~~Decidir onde a configuração mora.~~ **Decidido:**
-  `~/.config/omasession/config.json` é a fonte de verdade, lida pelo CLI e pelas
-  units; o `manifest.json` só fornece os defaults de uma instalação nova. O
-  store de preferências do quickshell não serve porque o timer e o restore de
-  login rodam justamente quando não há shell. O painel passa a *escrever* esse
-  arquivo, não a guardar o valor.
+Um `Process` (`Quickshell.Io`) por operação:
+
+- `statusProc` roda `omasession status --json`, com `StdioCollector` no
+  `stdout`; o JSON vira `root.realStatus` via `JSON.parse` dentro de um
+  `try/catch` — um CLI que mudou de forma ou imprimiu uma linha perdida vira
+  `lastError`, nunca um `TypeError` espalhado pelos `Text` do painel.
+- `saveProc`/`restoreProc` disparam `save`/`restore` sem coletar saída
+  (fire-and-forget); os dois chamam `root.refresh()` no `onExited`,
+  **independente do código de saída** — a recusa do guard é dado a mostrar no
+  banner, não motivo para esconder o resultado.
+- `configProc` é como o toggle escreve: `omasession config set restoreOnLogin
+  true|false`. É o único caminho de escrita, e existe porque DESIGN.md §6
+  proíbe o QML de tocar em arquivo nenhum diretamente — inclusive
+  `config.json`.
+- Refresh dispara em três gatilhos: ao carregar (`Component.onCompleted`), ao
+  abrir o painel (`onOpenedChanged`, o que importa mais — o usuário está
+  olhando agora), e um `Timer` de fundo (`max(10, intervalSec)` segundos) para
+  o ícone da barra (`attention`) não ficar velho enquanto o painel está
+  fechado.
+- `cliMissing` cobre a máquina onde `install` nunca rodou: em vez de "0
+  windows" com cara de sessão vazia de verdade, o painel diz que o CLI não foi
+  encontrado em `cliPath` e sugere `omasession install`. As duas causas têm
+  ações diferentes; só uma mensagem explícita distingue.
+
+Validado round-trip no guest: `config set` disparado pelo toggle grava em
+`~/.config/omasession/config.json` de verdade (confirmado por instrumentação
+temporária que logou `stdout`/`stderr`/`exit code` do `Process` e leu o
+arquivo depois — removida do arquivo final).
+
+## Pendência cosmética
+
+O `iconComponent` do `PanelHero` (o glifo ao lado de "OmaSession") continua
+sem desenhar — mesma família de armadilha do `implicitWidth`/`BarIconButton`
+acima, ainda não investigada a fundo porque não impede nada funcional.

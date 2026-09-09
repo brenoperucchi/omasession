@@ -17,25 +17,29 @@ ssh_() { timeout 120 ssh -p 2223 -i "$L/id_ed25519" -o BatchMode=yes -o Identiti
   omatest@127.0.0.1 "$1"; }
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-# Restaura o cenario original ao sair: este script e uma ferramenta de captura,
-# nao pode deixar o repo modificado so porque alguem tirou um print.
-ORIG=$(sed -n 's/.*property string scenario: "\([a-z]*\)".*/\1/p' Panel.qml | head -1)
-restore_scenario() {
-  [ -n "$ORIG" ] && python3 - "$ORIG" <<'PY'
+# Restaura cenario E mockMode ao sair: este script e uma ferramenta de captura,
+# nao pode deixar o repo modificado so porque alguem tirou um print. mockMode
+# tambem precisa ser restaurado desde que o default virou false (o painel le o
+# CLI de verdade agora) -- sem forcar mockMode=true aqui, este script deixaria
+# de renderizar o mock fixo e passaria a depender do que estiver salvo de
+# verdade no guest no momento da captura.
+ORIG_SCEN=$(sed -n 's/.*property string scenario: "\([a-z]*\)".*/\1/p' Panel.qml | head -1)
+ORIG_MOCK=$(sed -n 's/.*property bool mockMode: \(true\|false\).*/\1/p' Panel.qml | head -1)
+set_panel() {
+  python3 - "$1" "$2" <<'PY'
 import re,sys
 p='Panel.qml'; s=open(p,encoding='utf-8').read()
-open(p,'w',encoding='utf-8').write(
-    re.sub(r'property string scenario: "\w+"', f'property string scenario: "{sys.argv[1]}"', s))
+s=re.sub(r'property string scenario: "\w+"', f'property string scenario: "{sys.argv[1]}"', s)
+s=re.sub(r'property bool mockMode: (true|false)', f'property bool mockMode: {sys.argv[2]}', s)
+open(p,'w',encoding='utf-8').write(s)
 PY
 }
-trap restore_scenario EXIT
+restore_panel() {
+  [ -n "$ORIG_SCEN" ] && [ -n "$ORIG_MOCK" ] && set_panel "$ORIG_SCEN" "$ORIG_MOCK"
+}
+trap restore_panel EXIT
 
-python3 - "$SCEN" <<'PY'
-import re,sys
-p='Panel.qml'; s=open(p,encoding='utf-8').read()
-open(p,'w',encoding='utf-8').write(
-    re.sub(r'property string scenario: "\w+"', f'property string scenario: "{sys.argv[1]}"', s))
-PY
+set_panel "$SCEN" true
 scp -q -P 2223 -i "$L/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$L/known_hosts" \
   Panel.qml omatest@127.0.0.1:.config/omarchy/plugins/brenoperucchi.omasession/Panel.qml || exit 1

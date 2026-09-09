@@ -8,6 +8,8 @@
 #   omasession resolve [--json]   which command each open window resolves to
 #   omasession install            timer, login restore, browser policy, hyprresume
 #   omasession uninstall          undo install
+#   omasession config get <key>   read one config value (empty if unset)
+#   omasession config set <key> <value>   persist one config value
 #
 # Everything heavy lives here rather than in Panel.qml: a crash inside
 # quickshell takes down the bar, the dock and the menu at once, and restoring
@@ -465,7 +467,41 @@ cmd_uninstall() {
     say "uninstalled -- saved sessions in $SESSION_DIR were left alone"
 }
 
-usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# ── config ───────────────────────────────────────────────────────────────────
+# The one write path into config.json outside `install`. The panel is the
+# reason this exists: DESIGN.md §6 keeps every write out of Panel.qml, so a
+# toggle in the UI cannot poke the file itself -- it has to ask the CLI, same
+# as save/restore. Writing straight from QML would also duplicate the typing
+# rules below in a second language.
+cmd_config() {
+    local sub="${1:-}"
+    case "$sub" in
+        get)
+            local key="${2:?usage: omasession config get <key>}"
+            config_get "$key" ""
+            ;;
+        set)
+            local key="${2:?usage: omasession config set <key> <value>}"
+            local value="${3:?usage: omasession config set <key> <value>}"
+            mkdir -p "$CONFIG_DIR"
+            [[ -f "$CONFIG" ]] || echo '{}' > "$CONFIG"
+            # true/false/numbers stay bare JSON; anything else is a JSON string.
+            # A key that does not already round-trip through jq is rejected
+            # rather than written half-typed.
+            local typed
+            case "$value" in
+                true|false|[0-9]*) typed="$value" ;;
+                *) typed="$(jq -Rn --arg v "$value" '$v')" ;;
+            esac
+            jq --arg k "$key" --argjson v "$typed" '.[$k] = $v' "$CONFIG" \
+                > "$CONFIG.tmp" && mv -f "$CONFIG.tmp" "$CONFIG"
+            say "$key = $value"
+            ;;
+        *) die "usage: omasession config get|set <key> [value]" ;;
+    esac
+}
+
+usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
     save)      shift; cmd_save "$@" ;;
@@ -474,6 +510,7 @@ case "${1:-}" in
     resolve)   shift; cmd_resolve "$@" ;;
     install)   shift; cmd_install "$@" ;;
     uninstall) shift; cmd_uninstall "$@" ;;
+    config)    shift; cmd_config "$@" ;;
     -h|--help|help|"") usage ;;
     *) err "unknown command: $1"; usage; exit 1 ;;
 esac

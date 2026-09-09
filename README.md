@@ -7,14 +7,12 @@ Omarchy 4.
 
 ![OmaSession panel](screenshots/panel-healthy.png)
 
-> **Status: not usable yet.** The replay engine and the save guard are built and
-> measured; the CLI, the systemd units and the panel's data source are not. The
-> bar widget you see above renders **fabricated data** from a `mock` block. Its
-> data contract is real and produced by `omasession status --json` — including
-> which windows the restore can actually bring back, read from the same session
-> file the restore reads — but the QML is not yet reading it. From a terminal
-> the save/restore/status path does work; see
-> [Where it actually is](#where-it-actually-is).
+> **Status: usable end to end.** Save, restore, the guard, the resolver and the
+> panel all read and write through the real CLI now — no mock, no fabricated
+> data. The bar widget above is a live screenshot: `status --json` produces the
+> contract, `Process` in `Panel.qml` reads it, the buttons and the login toggle
+> call back into the same CLI. See
+> [Where it actually is](#where-it-actually-is) for what is verified where.
 
 ## Why a new plugin
 
@@ -94,24 +92,25 @@ session with a bad one. Both happened during development:
   exited **0**, and destroyed the file regardless — because it ran *after* the
   write it was meant to prevent.
 
-So `lib/session-save.sh` backs both files up, lets hyprresume write, validates
-what came out against the screen it was taken from, and rolls **both** back if
-the result is empty, smaller than the screen, or unparseable. It holds a lock so
-the snapshot timer cannot race itself, and reports a distinct exit code when it
-refuses. `test/guard-cases.sh` covers the cases (16 assertions, run against a
-live Hyprland).
+So `lib/session-save.sh` stages every save into its own generation, validates it
+against the screen it was taken from, fsyncs it, and only then publishes it —
+never editing the file a restore might read mid-write. A save that cannot prove
+itself never overwrites one that could. `test/guard-cases.sh` covers the cases
+(25 assertions, run against a live Hyprland, including killing the save at
+random and at the exact instant between the two publish renames).
 
 ## Where it actually is
 
 | Piece | State |
 |---|---|
 | `lib/replay.py` — the replay engine | **works**, validated across four real reboots |
-| `lib/session-save.sh` — save + guard | **works**, 16/16 in `test/guard-cases.sh` |
+| `lib/session-save.sh` — save + guard | **works**, 25/25 in `test/guard-cases.sh` |
+| `lib/resolve.py` — arbitrary application resolver | **works**, 19/19 against a real desktop |
 | `bin/browser-setup` — per-vendor policy | **works** |
-| Browser tab restore | **understood and measured**, not yet wired into the plugin |
-| `bin/omasession` — CLI (save/restore/status/install/uninstall) | **works**, exercised end to end in the lab |
+| Browser tab restore | **understood and measured** — see the `exit_type` finding above |
+| `bin/omasession` — CLI (save/restore/status/resolve/install/uninstall/config) | **works**, exercised end to end in the lab |
 | `systemd/` snapshot timer | **works**, written and enabled by `omasession install` |
-| `Panel.qml` — bar widget | **mockup**: renders real components, fabricated data. Not yet reading `status --json` |
+| `Panel.qml` — bar widget | **works**, reads `status --json` live and calls back into the CLI |
 
 ## Docs
 
