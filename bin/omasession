@@ -22,8 +22,10 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omasession"
 CONFIG="$CONFIG_DIR/config.json"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omasession"
 SAVE_STATE="$STATE_DIR/last-save.json"
-SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/hyprresume/sessions}"
-export OMASESSION_SESSION_DIR="$SESSION_DIR"
+# Fixo: o hyprresume 0.5.0 não aceita outro diretório (nenhuma string
+# HYPRRESUME_* no binário), então uma variável que parecesse redirecioná-lo
+# moveria o guard sem mover o writer. Ver lib/session-save.sh.
+SESSION_DIR="$HOME/.local/share/hyprresume/sessions"
 
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/autostart.lua"

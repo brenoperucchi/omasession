@@ -33,8 +33,13 @@ actually needs in order to give its tabs back.
 | | hyprresume 0.5.0 | OmaSession |
 |---|---|---|
 | 6 mixed windows | 0/6 in 150s | **6/6 in 7s** |
-| 3 single-instance Chromium windows | does not launch | **4/4 in 3s** |
-| after a real reboot | 0/6 | **5/5 in 5s** |
+| single-instance Chromium windows | does not launch | **4/4 in 3s** |
+| after a real reboot | 0 restored | **4/4 in 5s**, plus the browser's own tabs |
+
+The middle row was measured on a desktop where Chromium had reopened four
+windows, not three; the reboot row counts a later run of its own. Both used to
+be written against a denominator from a different measurement, which is exactly
+the kind of number this README criticises elsewhere.
 
 Geometry, floating state and a terminal's working directory come back identical.
 ## Any application, not a list of eight

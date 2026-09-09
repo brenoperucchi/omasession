@@ -32,7 +32,20 @@ if [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then
     export HYPRLAND_INSTANCE_SIGNATURE
 fi
 
-SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/hyprresume/sessions}"
+# O diretório é fixo porque o hyprresume não aceita outro: não há nenhuma
+# string HYPRRESUME_* no binário 0.5.0, e ele escreve sempre em
+# ~/.local/share/hyprresume/sessions. A versão anterior aceitava
+# OMASESSION_SESSION_DIR e usava-a para lock, backup, validação e sidecar --
+# enquanto o hyprresume continuava escrevendo no diretório padrão. O resultado
+# era pior que ignorar a variável: o guard protegia um caminho e o writer
+# escrevia noutro, e a sessão de verdade ficava fora do lock e fora da proteção.
+# Uma opção que finge isolar é a coisa exata que este projeto acusa nos outros.
+SESSION_DIR="$HOME/.local/share/hyprresume/sessions"
+if [[ -n "${OMASESSION_SESSION_DIR:-}" && "$OMASESSION_SESSION_DIR" != "$SESSION_DIR" ]]; then
+    printf 'session-save: OMASESSION_SESSION_DIR is not honoured -- hyprresume 0.5.0 always writes to %s\n' \
+        "$SESSION_DIR" >&2
+    exit 1
+fi
 NAME="${1:-last}"
 TOML="$SESSION_DIR/$NAME.toml"
 SIDECAR="$SESSION_DIR/$NAME.titles.json"
