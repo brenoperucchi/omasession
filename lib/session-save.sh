@@ -150,7 +150,15 @@ jq --arg when "$(date -u +%FT%TZ)" --argjson mons "$monitors" '{
            monitor: .monitor,
            monitorName: (($mons[]? | select(.id == $w.monitor) | .name) // null),
            at, size, floating} ]
-}' <<<"$clients" > "$tmp_sidecar"
+}' <<<"$clients" > "$tmp_sidecar.raw"
+
+# O que o resolvedor consegue dizer AGORA, com os processos ainda vivos: o
+# diretório real de cada terminal, ou por que ele não é recuperável. Depois do
+# reboot essa informação não existe mais em lugar nenhum -- é preciso gravá-la
+# junto, e é ela que permite ao painel prometer só o que vai cumprir.
+python3 "$(dirname "${BASH_SOURCE[0]}")/annotate.py" "$tmp_sidecar.raw" > "$tmp_sidecar" \
+    2>/dev/null || mv -f "$tmp_sidecar.raw" "$tmp_sidecar"
+rm -f "$tmp_sidecar.raw"
 mv -f "$tmp_sidecar" "$SIDECAR"
 
 # Only now is the pair consistent: both files describe the same capture, or

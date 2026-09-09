@@ -61,6 +61,11 @@ def main() -> int:
             "app": friendly(klass),
             "title": w.get("title", ""),
             "resolvable": klass.lower() in index,
+            # O que ESTA janela vai recuperar, não o que ela é. Vazio quando não
+            # há nada de especial a prometer.
+            "detail": w.get("cwd") or "",
+            "warn": ("" if w.get("cwd") or not w.get("cwdNote")
+                     else "directory not recoverable"),
         })
     json.dump(out, sys.stdout)
     return 0

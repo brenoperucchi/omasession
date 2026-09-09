@@ -42,10 +42,10 @@ Panel {
       "windows": 4, "workspaces": 4, "agoSec": 42, "refused": false, "detail": "",
       "daemonActive": false, "intervalSec": 30, "restoreOnLogin": true,
       "captured": [
-        { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "resolvable": true },
-        { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "resolvable": true },
-        { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "resolvable": true },
-        { "ws": 4, "mon": "HDMI-A-1", "cls": "chromium",             "app": "Chromium", "title": "Hyprland Wiki",  "resolvable": true }
+        { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "detail": "~/Devs/my project", "warn": "", "resolvable": true },
+        { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "detail": "", "warn": "", "resolvable": true },
+        { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "detail": "", "warn": "", "resolvable": true },
+        { "ws": 4, "mon": "HDMI-A-1", "cls": "chromium",             "app": "Chromium", "title": "Hyprland Wiki",  "detail": "tabs restored by the browser", "warn": "", "resolvable": true }
       ]
     },
     "refused": {
@@ -53,17 +53,17 @@ Panel {
       "detail": "partial save blocked: 1 window written, 4 on screen",
       "daemonActive": false, "intervalSec": 30, "restoreOnLogin": true,
       "captured": [
-        { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "resolvable": true },
-        { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "resolvable": true },
-        { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "resolvable": true },
-        { "ws": 4, "mon": "HDMI-A-1", "cls": "some.unknown.App",     "app": "App",      "title": "no desktop entry", "resolvable": false }
+        { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "detail": "~/Devs/my project", "warn": "", "resolvable": true },
+        { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "detail": "", "warn": "", "resolvable": true },
+        { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "detail": "", "warn": "", "resolvable": true },
+        { "ws": 4, "mon": "HDMI-A-1", "cls": "some.unknown.App",     "app": "App",      "title": "no desktop entry", "detail": "", "warn": "", "resolvable": false }
       ]
     },
     "contested": {
       "windows": 1, "workspaces": 1, "agoSec": 8, "refused": false, "detail": "",
       "daemonActive": true, "intervalSec": 30, "restoreOnLogin": false,
       "captured": [
-        { "ws": 1, "mon": "DP-1", "cls": "foot", "app": "Foot", "title": "~/Devs/omasession", "resolvable": true }
+        { "ws": 1, "mon": "DP-1", "cls": "foot", "app": "Foot", "title": "tmux", "detail": "", "warn": "directory not recoverable", "resolvable": true }
       ]
     }
   })
@@ -103,6 +103,12 @@ Panel {
 
   readonly property bool multiMonitor: byMonitor.length > 1
 
+
+  readonly property int comingBack: {
+    var n = 0
+    for (var i = 0; i < captured.length; i++) if (captured[i].resolvable) n++
+    return n
+  }
 
   readonly property int unresolvable: {
     var n = 0
@@ -259,13 +265,30 @@ Panel {
               }
             }
 
+            // A pergunta que importa segundos antes de reiniciar não é
+            // "o que eu tenho aberto" -- isso está na tela. É "o que volta".
+            // Um inventário responde a primeira; este número responde a
+            // segunda, e é a única das duas que uma ferramenta com lista fixa
+            // de aplicativos não consegue responder, porque ela não distingue
+            // "não suportado" de "vai funcionar".
             Text {
-              text: root.windowCount + (root.windowCount === 1 ? " window" : " windows")
-                    + "  ·  " + root.workspaceCount
-                    + (root.workspaceCount === 1 ? " workspace" : " workspaces")
-              color: root.fg
+              text: root.comingBack === root.windowCount
+                    ? "All " + root.windowCount + " come back"
+                    : root.comingBack + " of " + root.windowCount + " come back"
+              color: root.unresolvable > 0 ? Color.urgent : root.fg
               font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
+            }
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: root.workspaceCount
+                    + (root.workspaceCount === 1 ? " workspace" : " workspaces")
+                    + (root.multiMonitor ? ", " + root.byMonitor.length + " monitors" : "")
+              color: root.dim
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
             }
 
             Row {
@@ -386,25 +409,33 @@ Panel {
                         font.family: Style.font.family
                         font.pixelSize: Style.font.body
                       }
+                      // O que esta linha vai RECUPERAR. Para um terminal é o
+                      // diretório -- e quando não dá para recuperá-lo, dizer
+                      // isso vale mais que repetir o título da janela, que
+                      // ninguém vai reconhecer depois do reboot de qualquer
+                      // forma.
                       Text {
                         width: parent.width
                         elide: Text.ElideRight
-                        text: modelData.title
+                        text: modelData.detail || modelData.title
                         color: root.dim
                         font.family: Style.font.family
                         font.pixelSize: Style.font.caption
                       }
                     }
 
-                    // "Ready" só onde o resolvedor achou um .desktop. Uma
-                    // janela que não volta tem de aparecer ANTES do reboot.
+                    // Silêncio significa "vai voltar". Só a exceção fala: um
+                    // rótulo repetido em toda linha é ruído, e ruído esconde
+                    // exatamente o caso que precisa ser visto antes do reboot.
                     Text {
                       id: statusText
                       anchors.right: parent.right
                       anchors.rightMargin: Style.space(7)
                       anchors.verticalCenter: parent.verticalCenter
-                      text: modelData.resolvable ? "Ready" : "No command"
-                      color: modelData.resolvable ? Qt.darker(root.fg, 1.4) : Color.urgent
+                      visible: text !== ""
+                      text: !modelData.resolvable ? "no command"
+                            : (modelData.warn || "")
+                      color: Color.urgent
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
                     }
@@ -426,8 +457,9 @@ Panel {
           text: {
             var base = "Snapshot every " + root.intervalSec + "s"
             if (root.unresolvable > 0)
-              return base + " · " + root.unresolvable + " window(s) have no command and will not come back"
-            return base + " · Save now before rebooting"
+              return base + " · " + root.unresolvable
+                     + " window(s) have no launch command; nothing will reopen them"
+            return base
           }
         }
       }
