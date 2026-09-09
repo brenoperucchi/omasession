@@ -2,3 +2,18 @@
 *.tmp
 __pycache__/
 *.pyc
+
+# Artefatos do fluxo de desenvolvimento deste repo (protocolo de revisão do
+# Herdr, instruções para agentes de código). Ficam no disco para qualquer
+# checkout de desenvolvimento usar localmente; simplesmente não são
+# distribuídos.
+#
+# O motivo é concreto: `omarchy plugin add` faz um `git clone` simples, sem
+# seleção de arquivos guiada pelo manifest, então TUDO que estiver versionado
+# aqui acaba instalado na máquina de quem instala, em
+# ~/.config/omarchy/plugins/. Enviar instruções para agentes a cada instalação
+# é uma superfície de injeção que não tem nada a ver com o runtime do plugin.
+AGENTS.md
+CLAUDE.md
+.herdr/*
+.claude/

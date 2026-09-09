@@ -1,0 +1,101 @@
+[session]
+name = "last"
+timestamp = 1788902671
+
+[[window]]
+app_id = "foot"
+launch_cmd = "foot"
+workspace = "3"
+monitor = "Virtual-1"
+floating = false
+fullscreen = false
+position = [
+    2559,
+    38,
+]
+size = [
+    2533,
+    1321,
+]
+cwd = "/home/omatest"
+
+[[window]]
+app_id = "foot"
+launch_cmd = "foot"
+workspace = "1"
+monitor = "Virtual-1"
+floating = false
+fullscreen = false
+position = [
+    12,
+    38,
+]
+size = [
+    2533,
+    1321,
+]
+cwd = "/home/omatest/Devs/project-a"
+
+[[window]]
+app_id = "org.gnome.Nautilus"
+launch_cmd = "nautilus --new-window"
+workspace = "3"
+monitor = "Virtual-1"
+floating = false
+fullscreen = false
+position = [
+    12,
+    38,
+]
+size = [
+    2533,
+    1321,
+]
+
+[[window]]
+app_id = "chromium"
+launch_cmd = "/usr/bin/chromium"
+workspace = "2"
+monitor = "Virtual-1"
+floating = false
+fullscreen = false
+position = [
+    12,
+    38,
+]
+size = [
+    5080,
+    1321,
+]
+
+[[window]]
+app_id = "md.obsidian.Obsidian"
+launch_cmd = "/usr/bin/obsidian"
+workspace = "4"
+monitor = "Virtual-1"
+floating = true
+fullscreen = false
+position = [
+    2142,
+    364,
+]
+size = [
+    820,
+    670,
+]
+
+[[window]]
+app_id = "foot"
+launch_cmd = "foot"
+workspace = "1"
+monitor = "Virtual-1"
+floating = false
+fullscreen = false
+position = [
+    2559,
+    38,
+]
+size = [
+    2533,
+    1321,
+]

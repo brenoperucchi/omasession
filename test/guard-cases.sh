@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Cases the session-save guard has to get right. Runs inside the guest: needs a
+# live Hyprland and hyprresume, and it drives real windows.
+#
+# The guard exists because the first version of it did not protect the file that
+# matters. Measured on 2026-09-08 against the version at commit aef8f0b, with an
+# empty screen and a 3-window session on disk:
+#
+#     session-save: refusing to overwrite 3 saved windows with 0
+#     exit code: 0
+#     resultado: toml=0 sidecar=3
+#
+# It printed the refusal, reported success, and destroyed the toml anyway --
+# leaving a sidecar claiming three windows beside a session holding none. That
+# pair makes the replay print "title sidecar: 3 window(s)" and then "0/0 placed",
+# and exit 0. Reporting a restore that did not happen is the failure this whole
+# project exists to avoid, so it gets a test.
+#
+#   ./guard-cases.sh          run every case
+#   ./guard-cases.sh --keep   leave the scenario windows open afterwards
+
+set -uo pipefail
+
+SAVE="${OMASESSION_SAVE:-$HOME/session-save-new.sh}"
+S="$HOME/.local/share/hyprresume/sessions"
+STUB="$(mktemp -d)"
+BACKUP="$(mktemp -d)"
+KEEP=0
+[[ "${1:-}" == "--keep" ]] && KEEP=1
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "$XDG_RUNTIME_DIR/hypr" | head -1)}"
+
+pass=0; fail=0
+check() { # check <name> <expected> <actual>
+    if [[ "$2" == "$3" ]]; then printf '  ok   %s\n' "$1"; pass=$((pass+1))
+    else printf '  FAIL %s: esperado [%s], obtido [%s]\n' "$1" "$2" "$3"; fail=$((fail+1)); fi
+}
+windows_on_screen() { hyprctl clients -j | jq '[.[]|select(.mapped)|select(.workspace.id>0)]|length'; }
+toml_count()    { grep -c '^\[\[window\]\]' "$S/last.toml" 2>/dev/null || echo 0; }
+sidecar_count() { jq '.windows|length' "$S/last.titles.json" 2>/dev/null || echo 0; }
+fingerprint()   { md5sum "$S/last.toml" "$S/last.titles.json" 2>/dev/null | cut -d' ' -f1 | tr '\n' ' '; }
+close_all()     { for a in $(hyprctl clients -j | jq -r '.[]|select(.mapped)|.address'); do
+                      hyprctl repl "hl.dispatch(hl.dsp.window.close{window=\"address:$a\"})" >/dev/null
+                  done; sleep 4; }
+
+cat > "$STUB/hyprresume" <<'STUBEOF'
+#!/usr/bin/env bash
+# Produces a controlled last.toml so the guard's decisions can be exercised
+# without waiting for a real failure of the real hyprresume.
+S=$HOME/.local/share/hyprresume/sessions
+case "${STUB_MODE:-partial}" in
+  partial) printf '[session]\nname = "last"\n\n[[window]]\napp_id = "foot"\nlaunch_cmd = "foot"\nworkspace = "1"\n' > "$S/last.toml" ;;
+  garbage) printf '[session\nnot toml ][\n' > "$S/last.toml" ;;
+  empty)   printf '[session]\nname = "last"\n' > "$S/last.toml" ;;
+  crash)   exit 7 ;;
+esac
+STUBEOF
+chmod +x "$STUB/hyprresume"
+
+cp -a "$S/." "$BACKUP/" 2>/dev/null || true
+restore_session() { rm -rf "${S:?}"/*; cp -a "$BACKUP/." "$S/" 2>/dev/null || true; }
+cleanup() { restore_session; rm -rf "$STUB" "$BACKUP"; }
+trap cleanup EXIT
+
+echo "== caminho feliz: uma tela populada publica, e o par fica consistente"
+close_all
+"$HOME/probe.sh" scenario >/dev/null 2>&1
+sleep 3
+screen="$(windows_on_screen)"
+"$SAVE" >/dev/null; rc=$?
+check "publica com rc=0"              "0"       "$rc"
+check "toml recebe as $screen janelas" "$screen" "$(toml_count)"
+check "par consistente"                "$(toml_count)" "$(sidecar_count)"
+
+echo "== recusas: cada uma preserva OS DOIS arquivos byte a byte"
+for mode in partial garbage empty crash; do
+    before="$(fingerprint)"
+    STUB_MODE="$mode" PATH="$STUB:$PATH" "$SAVE" >/dev/null 2>&1; rc=$?
+    check "$mode: nao publica"        "nao-zero" "$( ((rc)) && echo nao-zero || echo zero)"
+    check "$mode: arquivos intactos"  "$before"  "$(fingerprint)"
+done
+
+echo "== encolhimento legitimo: quem fechou janelas de verdade tem de conseguir salvar"
+saved_before="$(toml_count)"
+for a in $(hyprctl clients -j | jq -r '.[]|select(.mapped)|select(.class!="foot")|.address'); do
+    hyprctl repl "hl.dispatch(hl.dsp.window.close{window=\"address:$a\"})" >/dev/null
+done
+sleep 4
+screen="$(windows_on_screen)"
+"$SAVE" >/dev/null; rc=$?
+check "publica mesmo com menos que antes ($saved_before -> $screen)" "0" "$rc"
+check "toml acompanha a tela"                                        "$screen" "$(toml_count)"
+
+echo "== tela vazia: o caso que destruia a sessao"
+close_all
+before="$(fingerprint)"
+"$SAVE" >/dev/null 2>&1; rc=$?
+check "recusa com rc=3"          "3"       "$rc"
+check "arquivos intactos"        "$before" "$(fingerprint)"
+
+echo "== lock: dois saves nao se sobrepoem"
+flock -x "$S/.last.lock" -c "sleep 5" &
+sleep 1
+"$SAVE" >/dev/null 2>&1; rc=$?
+check "segundo save desiste com rc=4" "4" "$rc"
+wait
+
+((KEEP)) || close_all
+printf '\n%d ok, %d falha(s)\n' "$pass" "$fail"
+exit $(( fail > 0 ))

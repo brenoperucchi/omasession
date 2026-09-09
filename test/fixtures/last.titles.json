@@ -1,0 +1,101 @@
+{
+    "when": "2026-09-08T21:24:31Z",
+    "windows": [
+        {
+            "class": "foot",
+            "title": "omatest@omabackup-vm:~/Devs/project-a",
+            "pid": 14912,
+            "workspace": 1,
+            "monitor": 0,
+            "at": [
+                12,
+                38
+            ],
+            "size": [
+                2533,
+                1321
+            ],
+            "floating": false
+        },
+        {
+            "class": "foot",
+            "title": "foot",
+            "pid": 15171,
+            "workspace": 1,
+            "monitor": 0,
+            "at": [
+                2559,
+                38
+            ],
+            "size": [
+                2533,
+                1321
+            ],
+            "floating": false
+        },
+        {
+            "class": "chromium",
+            "title": "sentinel-001-1788891094545482708-A - Chromium",
+            "pid": 15203,
+            "workspace": 2,
+            "monitor": 0,
+            "at": [
+                12,
+                38
+            ],
+            "size": [
+                5080,
+                1321
+            ],
+            "floating": false
+        },
+        {
+            "class": "org.gnome.Nautilus",
+            "title": "Home",
+            "pid": 15381,
+            "workspace": 3,
+            "monitor": 0,
+            "at": [
+                12,
+                38
+            ],
+            "size": [
+                2533,
+                1321
+            ],
+            "floating": false
+        },
+        {
+            "class": "foot",
+            "title": "omatest@omabackup-vm:~",
+            "pid": 15498,
+            "workspace": 3,
+            "monitor": 0,
+            "at": [
+                2559,
+                38
+            ],
+            "size": [
+                2533,
+                1321
+            ],
+            "floating": false
+        },
+        {
+            "class": "md.obsidian.Obsidian",
+            "title": "Obsidian",
+            "pid": 15766,
+            "workspace": 4,
+            "monitor": 0,
+            "at": [
+                2142,
+                364
+            ],
+            "size": [
+                820,
+                670
+            ],
+            "floating": true
+        }
+    ]
+}
