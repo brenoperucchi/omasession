@@ -301,13 +301,29 @@ write_units() {
     mkdir -p "$UNIT_DIR"
     local interval; interval="$(config_get saveIntervalSec "$DEFAULT_SAVE_INTERVAL")"
 
+    # Anchored on default.target, not graphical-session.target. The obvious
+    # choice was wrong, and only a real reboot caught it: on this lab's Omarchy
+    # 4 (SDDM autologin -> /usr/bin/start-hyprland -> Hyprland, no UWSM session
+    # unit in between), graphical-session.target is a loaded but permanently
+    # inactive definition -- nothing ever starts it, so a timer WantedBy=it
+    # never comes back after a reboot even though `systemctl --user
+    # is-enabled` still says "enabled". Measured: after a spontaneous VM
+    # restart, autostart.lua's `restore --if-enabled` ran (confirmed in the
+    # journal) and windows came back, but the snapshot timer stayed inactive
+    # the whole time -- silently. default.target is the one target this host
+    # actually reaches for a graphical login (confirmed active in the same
+    # session), and every other login manager reaches it too, since it is
+    # where systemd itself lands any user session.
+    #
+    # The cost of anchoring here instead of a graphical-session target: the
+    # timer also runs for a plain SSH login with no Hyprland at all. That is
+    # harmless by construction, not by luck -- session-save.sh's own guard
+    # exits 3 ("cannot read hyprctl clients") without touching anything when
+    # there is no compositor to read, and 3 is already in SuccessExitStatus
+    # below.
     cat > "$UNIT_DIR/omasession-snapshot.service" <<UNIT
 [Unit]
 Description=OmaSession session snapshot
-# Only meaningful while a graphical session exists; without this the timer keeps
-# firing after logout and every run is a refusal against an empty screen.
-PartOf=graphical-session.target
-After=graphical-session.target
 
 [Service]
 Type=oneshot
@@ -321,7 +337,6 @@ UNIT
     cat > "$UNIT_DIR/omasession-snapshot.timer" <<UNIT
 [Unit]
 Description=OmaSession session snapshot
-PartOf=graphical-session.target
 
 [Timer]
 OnActiveSec=${interval}s
@@ -329,7 +344,7 @@ OnUnitActiveSec=${interval}s
 AccuracySec=1s
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target
 UNIT
     say "units written to $UNIT_DIR (every ${interval}s)"
 }
@@ -436,6 +451,12 @@ cmd_install() {
     fi
 
     disarm_hyprresume
+    # Disable before rewriting: `enable` never removes a symlink left by an
+    # older [Install] section, so upgrading from a version anchored on a
+    # different target (graphical-session.target -- see write_units for why
+    # that one turned out wrong) would leave a stale .wants/ symlink pointing
+    # at the now-rewritten file, active by whichever target happens to start.
+    systemctl --user disable --now omasession-snapshot.timer >/dev/null 2>&1 || true
     write_units
     systemctl --user daemon-reload
     systemctl --user enable --now omasession-snapshot.timer >/dev/null 2>&1 \
