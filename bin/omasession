@@ -115,11 +115,17 @@ status_json() {
     local windows=0
     [[ -f "$toml" ]] && windows="$(grep -c '^\[\[window\]\]' "$toml" 2>/dev/null || echo 0)"
 
+    # The captured list carries what the panel needs to group and to be honest:
+    # the workspace it belongs to, a name a person recognises, and whether the
+    # resolver can actually bring it back. "Ready" is a claim; `resolvable` is
+    # a claim we can support -- answered from the .desktop index, which needs no
+    # live process, because the saved session describes windows already gone.
     local captured='[]'
     if [[ -f "$sidecar" ]]; then
-        captured="$(jq -c '[.windows[]? | {ws: .workspace, cls: .class, title: .title}]' \
-            "$sidecar" 2>/dev/null || echo '[]')"
+        captured="$(python3 "$LIB/captured.py" "$sidecar" 2>/dev/null || echo '[]')"
     fi
+
+    workspaces="$(jq -c '[.[].ws] | unique | length' <<<"$captured" 2>/dev/null || echo 0)"
 
     # Age is measured from the session file, not from our own state file: the
     # question the user has is "how old is what would be restored", and only the
@@ -154,9 +160,14 @@ status_json() {
         --arg lastSave "$when" \
         --arg timer "$timer" \
         --arg session "$toml" \
-        '{windows:$windows, agoSec:$agoSec, refused:$refused, detail:$detail,
-          daemonActive:$daemonActive, captured:$captured,
-          lastSave:$lastSave, timer:$timer, session:$session}'
+        --argjson workspaces "${workspaces:-0}" \
+        --argjson intervalSec "$(config_get saveIntervalSec "$DEFAULT_SAVE_INTERVAL")" \
+        --argjson restoreOnLogin "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" \
+        '{windows:$windows, workspaces:$workspaces, agoSec:$agoSec,
+          refused:$refused, detail:$detail, daemonActive:$daemonActive,
+          captured:$captured, lastSave:$lastSave, timer:$timer,
+          intervalSec:$intervalSec, restoreOnLogin:$restoreOnLogin,
+          session:$session}'
 }
 
 cmd_status() {
