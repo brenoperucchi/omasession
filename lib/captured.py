@@ -54,6 +54,9 @@ def main() -> int:
         klass = w.get("class", "")
         out.append({
             "ws": w.get("workspace"),
+            # Nome quando existir; sessões gravadas antes disto só têm o índice,
+            # e "Monitor 0" é honesto sobre o que sabemos.
+            "mon": w.get("monitorName") or ("Monitor %s" % w.get("monitor", "?")),
             "cls": klass,
             "app": friendly(klass),
             "title": w.get("title", ""),

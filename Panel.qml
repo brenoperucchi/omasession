@@ -42,10 +42,10 @@ Panel {
       "windows": 4, "workspaces": 4, "agoSec": 42, "refused": false, "detail": "",
       "daemonActive": false, "intervalSec": 30, "restoreOnLogin": true,
       "captured": [
-        { "ws": 1, "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "resolvable": true },
-        { "ws": 2, "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "resolvable": true },
-        { "ws": 3, "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",              "resolvable": true },
-        { "ws": 4, "cls": "chromium",             "app": "Chromium", "title": "Hyprland Wiki",      "resolvable": true }
+        { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "resolvable": true },
+        { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "resolvable": true },
+        { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "resolvable": true },
+        { "ws": 4, "mon": "HDMI-A-1", "cls": "chromium",             "app": "Chromium", "title": "Hyprland Wiki",  "resolvable": true }
       ]
     },
     "refused": {
@@ -53,17 +53,17 @@ Panel {
       "detail": "partial save blocked: 1 window written, 4 on screen",
       "daemonActive": false, "intervalSec": 30, "restoreOnLogin": true,
       "captured": [
-        { "ws": 1, "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "resolvable": true },
-        { "ws": 2, "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "resolvable": true },
-        { "ws": 3, "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",              "resolvable": true },
-        { "ws": 4, "cls": "some.unknown.App",     "app": "App",      "title": "no desktop entry",   "resolvable": false }
+        { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "resolvable": true },
+        { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "resolvable": true },
+        { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "resolvable": true },
+        { "ws": 4, "mon": "HDMI-A-1", "cls": "some.unknown.App",     "app": "App",      "title": "no desktop entry", "resolvable": false }
       ]
     },
     "contested": {
       "windows": 1, "workspaces": 1, "agoSec": 8, "refused": false, "detail": "",
       "daemonActive": true, "intervalSec": 30, "restoreOnLogin": false,
       "captured": [
-        { "ws": 1, "cls": "foot", "app": "Foot", "title": "~/Devs/omasession", "resolvable": true }
+        { "ws": 1, "mon": "DP-1", "cls": "foot", "app": "Foot", "title": "~/Devs/omasession", "resolvable": true }
       ]
     }
   })
@@ -74,23 +74,35 @@ Panel {
   readonly property int intervalSec:   status ? status.intervalSec : 30
   readonly property bool restoreOnLogin: status ? status.restoreOnLogin : true
 
-  // Agrupar por workspace porque é assim que a sessão é navegada -- DESIGN.md §4
-  // chama isso de "a forma da sessão". Uma lista plana obriga o leitor a
-  // reconstruir o agrupamento de cabeça.
-  readonly property var byWorkspace: {
-    var groups = {}
-    var list = captured
-    for (var i = 0; i < list.length; i++) {
-      var ws = list[i].ws
-      if (!groups[ws]) groups[ws] = []
-      groups[ws].push(list[i])
+  // Monitor -> workspace -> janelas. Um workspace só faz sentido junto do
+  // monitor em que estava: "workspace 2" na tela do meio e "workspace 2" na da
+  // direita são lugares diferentes, e quem tem duas telas navega pensando na
+  // tela primeiro. Com um monitor só o nível some, porque aí ele não informa
+  // nada e só empurra a lista para baixo.
+  readonly property var byMonitor: {
+    var mons = {}
+    var order = []
+    for (var i = 0; i < captured.length; i++) {
+      var w = captured[i]
+      var m = w.mon || "?"
+      if (!mons[m]) { mons[m] = {}; order.push(m) }
+      if (!mons[m][w.ws]) mons[m][w.ws] = []
+      mons[m][w.ws].push(w)
     }
     var out = []
-    var keys = Object.keys(groups).sort(function(a, b) { return a - b })
-    for (var k = 0; k < keys.length; k++)
-      out.push({ ws: parseInt(keys[k]), items: groups[keys[k]] })
+    for (var k = 0; k < order.length; k++) {
+      var name = order[k]
+      var wss = Object.keys(mons[name]).sort(function(a, b) { return a - b })
+      var groups = []
+      for (var j = 0; j < wss.length; j++)
+        groups.push({ ws: parseInt(wss[j]), items: mons[name][wss[j]] })
+      out.push({ mon: name, workspaces: groups })
+    }
     return out
   }
+
+  readonly property bool multiMonitor: byMonitor.length > 1
+
 
   readonly property int unresolvable: {
     var n = 0
@@ -155,24 +167,54 @@ Panel {
         width: parent.width
         spacing: Style.spacing.lg
 
-        PanelHero {
+        Item {
           width: parent.width
-          title: "OmaSession"
-          meta: "pick up where you left off"
-          foreground: root.fg
-          // O Component precisa de um Item com tamanho: um OpticalGlyph solto
-          // dentro do Loader do PanelHero fica sem geometria e nao aparece --
-          // a mesma armadilha do implicitWidth no BarIconButton.
-          iconComponent: Component {
-            Item {
-              implicitWidth: Style.font.display
-              implicitHeight: Style.font.display
-              OpticalGlyph {
-                anchors.centerIn: parent
-                text: ""
-                color: root.fg
-                fontSize: Style.font.display
+          height: hero.implicitHeight
+
+          PanelHero {
+            id: hero
+            anchors.left: parent.left
+            anchors.right: loginToggle.left
+            anchors.rightMargin: Style.space(8)
+            title: "OmaSession"
+            meta: "pick up where you left off"
+            foreground: root.fg
+            iconComponent: Component {
+              Item {
+                implicitWidth: Style.font.display
+                implicitHeight: Style.font.display
+                OpticalGlyph {
+                  anchors.centerIn: parent
+                  text: ""
+                  color: root.fg
+                  fontSize: Style.font.display
+                }
               }
+            }
+          }
+
+          // O interruptor mora aqui, na linha do nome, porque é o estado do
+          // plugin inteiro -- não mais um item de lista entre outros. O texto
+          // aparece no hover e diz o que ACONTECE, não o que a opção se chama:
+          // a pergunta do usuário é "e se eu reiniciar agora?".
+          ToggleSwitch {
+            id: loginToggle
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            checked: root.restoreOnLogin
+            onToggled: console.log("mock: escreveria restoreOnLogin em config.json")
+
+            // PanelToolTip é um ToolTip (Popup): não aceita anchors, e se
+            // posiciona sozinho quando é filho do item a que pertence. Tentar
+            // ancorá-lo derruba o widget inteiro com "Cannot assign to
+            // non-existent property verticalCenter" -- e derruba junto o ícone
+            // da barra, porque é o mesmo arquivo.
+            PanelToolTip {
+              visible: loginToggle.containsMouse
+              fontFamily: Style.font.family
+              text: root.restoreOnLogin
+                    ? "Reboot now and these windows come back"
+                    : "Reboot now and nothing reopens"
             }
           }
         }
@@ -288,105 +330,85 @@ Panel {
           }
         }
 
-        // ── restore ao login ─────────────────────────────────────────────
-        Item {
-          width: parent.width
-          height: Math.max(loginCol.implicitHeight, loginToggle.height)
-
-          Column {
-            id: loginCol
-            anchors.left: parent.left
-            anchors.right: loginToggle.left
-            anchors.rightMargin: Style.space(8)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.xxs
-            Text {
-              text: "Restore after login"
-              color: root.fg
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-            }
-            Text {
-              width: parent.width
-              wrapMode: Text.WordWrap
-              text: "Reopen these windows automatically"
-              color: root.dim
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-          }
-
-          ToggleSwitch {
-            id: loginToggle
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            checked: root.restoreOnLogin
-            onToggled: console.log("mock: escreveria restoreOnLogin em config.json")
-          }
-        }
-
         PanelSeparator { width: parent.width }
 
-        // ── as janelas, agrupadas por workspace ──────────────────────────
+        // ── as janelas: monitor -> workspace -> apps ─────────────────────
         Repeater {
-          model: root.byWorkspace
+          model: root.byMonitor
 
           Column {
             width: column.width
             spacing: Style.spacing.sm
 
-            PanelSectionHeader {
-              width: parent.width
-              text: "WORKSPACE " + modelData.ws
+            // O nível do monitor só aparece quando há mais de um. Numa tela só
+            // ele seria uma linha constante repetindo o óbvio.
+            Text {
+              visible: root.multiMonitor
+              text: modelData.mon
+              color: Color.accent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
             }
 
             Repeater {
-              model: modelData.items
+              model: modelData.workspaces
 
-              Rectangle {
-                width: parent.width
-                height: itemCol.implicitHeight + Style.space(10)
-                radius: Style.space(3)
-                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+              Column {
+                width: column.width
+                spacing: Style.spacing.sm
 
-                Column {
-                  id: itemCol
-                  anchors.left: parent.left
-                  anchors.right: statusText.left
-                  anchors.margins: Style.space(7)
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.spacing.xxs
-
-                  Text {
-                    text: modelData.app
-                    color: root.fg
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                  }
-                  Text {
-                    width: parent.width
-                    elide: Text.ElideRight
-                    text: modelData.title
-                    color: root.dim
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                  }
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "WORKSPACE " + modelData.ws
                 }
 
-                // O OmaResume escreve "Ready" para tudo. Nós só podemos dizer
-                // isso do que o resolvedor encontra num .desktop -- e dizer
-                // "No command" do resto é o ponto: uma janela que não vai
-                // voltar tem de aparecer antes do reboot, não depois.
-                Text {
-                  id: statusText
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(7)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: modelData.resolvable ? "Ready" : "No command"
-                  color: modelData.resolvable ? Qt.darker(root.fg, 1.4) : Color.urgent
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
+                Repeater {
+                  model: modelData.items
+
+                  Rectangle {
+                    width: parent.width
+                    height: itemCol.implicitHeight + Style.space(10)
+                    radius: Style.space(3)
+                    color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+
+                    Column {
+                      id: itemCol
+                      anchors.left: parent.left
+                      anchors.right: statusText.left
+                      anchors.margins: Style.space(7)
+                      anchors.rightMargin: Style.space(8)
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.spacing.xxs
+
+                      Text {
+                        text: modelData.app
+                        color: root.fg
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                      }
+                      Text {
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: modelData.title
+                        color: root.dim
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    // "Ready" só onde o resolvedor achou um .desktop. Uma
+                    // janela que não volta tem de aparecer ANTES do reboot.
+                    Text {
+                      id: statusText
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.space(7)
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: modelData.resolvable ? "Ready" : "No command"
+                      color: modelData.resolvable ? Qt.darker(root.fg, 1.4) : Color.urgent
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
                 }
               }
             }

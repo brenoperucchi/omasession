@@ -133,13 +133,22 @@ fi
 # truncated file behind. The replay parses the sidecar without a try, so a
 # truncated one takes the whole restore down with a traceback.
 tmp_sidecar="$(mktemp "$SESSION_DIR/.$NAME.titles.XXXXXX")"
-jq --arg when "$(date -u +%FT%TZ)" '{
+# O nome do monitor, não o índice. `client.monitor` é uma posição na lista de
+# monitores daquele instante: desligar uma tela renumera todas as outras, e uma
+# sessão gravada com índices passa a descrever um arranjo que não existe mais.
+# O nome ("DP-1") é o que o compositor aceita de volta e o que uma pessoa lê.
+monitors="$(hyprctl monitors -j 2>/dev/null || echo '[]')"
+
+jq --arg when "$(date -u +%FT%TZ)" --argjson mons "$monitors" '{
     when: $when,
+    monitors: [ $mons[]? | {id, name, description} ],
     windows: [ .[]
         | select(.mapped) | select(.workspace.id > 0)
+        | . as $w
         | {class, title, pid,
            workspace: .workspace.id,
            monitor: .monitor,
+           monitorName: (($mons[]? | select(.id == $w.monitor) | .name) // null),
            at, size, floating} ]
 }' <<<"$clients" > "$tmp_sidecar"
 mv -f "$tmp_sidecar" "$SIDECAR"
