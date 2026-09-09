@@ -546,20 +546,85 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
     return min(placed, want)
 
 
+def sidecar_for(toml: Path) -> Path:
+    """`last.toml` -> `last.titles.json`.
+
+    Built by stripping the suffix rather than with with_suffix(): a session
+    named `work.v2.toml` used to become `work.titles.json` and point at the
+    wrong file -- or none -- while session-save.sh names it by concatenation.
+    """
+    return Path(str(toml).removesuffix(".toml") + ".titles.json")
+
+
+def read_pair(toml: Path) -> tuple[list[dict], list[dict], str, str] | None:
+    """(windows, titles, toml generation, sidecar generation), or None."""
+    if not toml.is_file():
+        return None
+    try:
+        doc = tomllib.loads(toml.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    windows = doc.get("window", [])
+    gen_toml = str(doc.get("omasession", {}).get("generation", ""))
+
+    titles: list[dict] = []
+    gen_side = ""
+    side = sidecar_for(toml)
+    if side.is_file():
+        try:
+            data = json.loads(side.read_text())
+            titles = data.get("windows", [])
+            gen_side = str(data.get("generation", ""))
+        except (OSError, json.JSONDecodeError):
+            titles, gen_side = [], ""
+    return windows, titles, gen_toml, gen_side
+
+
+def load_pair(path: Path) -> tuple[list[dict], list[dict], Path]:
+    """The session to restore, preferring a pair that agrees with itself.
+
+    Publishing is two renames, and two renames are not a transaction. Rather
+    than pretend otherwise, both halves carry the generation they came from: a
+    crash between the two leaves a toml from one save beside a sidecar from
+    another, and restoring that silently mixes two sessions -- browser windows
+    matched against titles that belong to a different capture. When the stamps
+    disagree, the previous generation is used, because a slightly older session
+    that is internally consistent beats a current one that is not.
+    """
+    current = read_pair(path)
+    if current is None:
+        print(f"no session file at {path}", file=sys.stderr)
+        return [], [], sidecar_for(path)
+
+    windows, titles, gen_toml, gen_side = current
+    torn = bool(gen_toml) and bool(gen_side) and gen_toml != gen_side
+    if torn:
+        print(f"! {path.name} and its sidecar come from different saves "
+              f"({gen_toml} vs {gen_side}) -- the pair was published torn")
+        prev = Path(str(path).removesuffix(".toml") + ".prev.toml")
+        fallback = read_pair(prev)
+        if fallback and (not fallback[2] or not fallback[3]
+                         or fallback[2] == fallback[3]):
+            print(f"  using the previous generation from {prev.name} instead")
+            return fallback[0], fallback[1], sidecar_for(prev)
+        print("  no consistent previous generation; continuing with titles dropped")
+        titles = []
+
+    side = sidecar_for(path)
+    if titles:
+        print(f"title sidecar: {len(titles)} window(s) from {side.name}")
+    elif not side.is_file():
+        print("no title sidecar -- browser windows cannot be told apart")
+    return windows, titles, side
+
+
 def main() -> int:
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else SESSION
     if not path.is_file():
         print(f"no session file at {path}", file=sys.stderr)
         return 1
 
-    windows = tomllib.loads(path.read_text()).get("window", [])
-    sidecar = path.with_suffix("").with_suffix(".titles.json")
-    titles: list[dict] = []
-    if sidecar.is_file():
-        titles = json.loads(sidecar.read_text()).get("windows", [])
-        print(f"title sidecar: {len(titles)} window(s) from {sidecar.name}")
-    else:
-        print("no title sidecar -- browser windows cannot be told apart")
+    windows, titles, sidecar = load_pair(path)
 
     print(f"restoring {len(windows)} window(s) from {path}\n")
 

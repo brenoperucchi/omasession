@@ -64,13 +64,19 @@ close_all()     { for a in $(hyprctl clients -j | jq -r '.[]|select(.mapped)|.ad
 
 cat > "$STUB/hyprresume" <<'STUBEOF'
 #!/usr/bin/env bash
-# Produces a controlled last.toml so the guard's decisions can be exercised
-# without waiting for a real failure of the real hyprresume.
+# Produz um toml controlado para exercitar as decisões do guard sem esperar uma
+# falha real do hyprresume.
+#
+# Honra o NOME pedido, como o hyprresume de verdade: `save <nome>` escreve
+# `<nome>.toml` e não toca em nenhum outro -- verificado no 0.5.0. Um stub que
+# escrevesse direto em `last.toml` estaria testando um mecanismo que não existe
+# mais, e passaria a reprovar o código por fazer a coisa certa.
 S=$HOME/.local/share/hyprresume/sessions
+NAME="${2:-last}"
 case "${STUB_MODE:-partial}" in
-  partial) printf '[session]\nname = "last"\n\n[[window]]\napp_id = "foot"\nlaunch_cmd = "foot"\nworkspace = "1"\n' > "$S/last.toml" ;;
-  garbage) printf '[session\nnot toml ][\n' > "$S/last.toml" ;;
-  empty)   printf '[session]\nname = "last"\n' > "$S/last.toml" ;;
+  partial) printf '[session]\nname = "%s"\n\n[[window]]\napp_id = "foot"\nlaunch_cmd = "foot"\nworkspace = "1"\n' "$NAME" > "$S/$NAME.toml" ;;
+  garbage) printf '[session\nnot toml ][\n' > "$S/$NAME.toml" ;;
+  empty)   printf '[session]\nname = "%s"\n' "$NAME" > "$S/$NAME.toml" ;;
   crash)   exit 7 ;;
 esac
 STUBEOF
@@ -116,6 +122,29 @@ before="$(fingerprint)"
 "$SAVE" >/dev/null 2>&1; rc=$?
 check "recusa com rc=3"          "3"       "$rc"
 check "arquivos intactos"        "$before" "$(fingerprint)"
+
+echo "== publicacao: o par nunca sai rasgado, nem morrendo no meio"
+close_all
+"$HOME/probe.sh" scenario >/dev/null 2>&1
+sleep 3
+"$SAVE" >/dev/null
+gen_toml() { sed -n 's/^generation = "\(.*\)"/\1/p' "$S/last.toml" | tail -1; }
+gen_side() { jq -r '.generation // ""' "$S/last.titles.json" 2>/dev/null; }
+check "as duas metades carregam a mesma geracao" "$(gen_toml)" "$(gen_side)"
+check "a geracao anterior fica recuperavel" "sim" \
+      "$([ -f "$S/last.prev.toml" ] && echo sim || echo nao)"
+
+torn=0
+for i in $(seq 1 8); do
+    ( "$SAVE" >/dev/null 2>&1 ) &
+    bg=$!
+    python3 -c "import time,random; time.sleep(random.uniform(0.05,0.9))"
+    if (( i % 2 )); then kill -KILL "$bg" 2>/dev/null; else kill -TERM "$bg" 2>/dev/null; fi
+    wait "$bg" 2>/dev/null
+    [[ "$(gen_toml)" == "$(gen_side)" ]] || torn=$((torn+1))
+done
+check "8 mortes no meio do save, nenhum par rasgado" "0" "$torn"
+check "nenhum staging orfao" "0" "$(ls "$S"/*staging* 2>/dev/null | wc -l)"
 
 echo "== lock: dois saves nao se sobrepoem"
 flock -x "$S/.last.lock" -c "sleep 5" &

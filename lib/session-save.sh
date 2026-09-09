@@ -78,43 +78,41 @@ with open(sys.argv[1], "rb") as fh:
 PY
 }
 
+# ── encenar, validar, publicar ───────────────────────────────────────────────
+# hyprresume aceita um NOME de sessão e escreve `<nome>.toml` no mesmo
+# diretório, sem tocar em nenhum outro -- verificado. Então ele nunca mais
+# escreve sobre a sessão publicada: escreve numa geração lateral, que só vira
+# `last` depois de validada.
+#
+# Isso substitui o backup-e-rollback anterior, que tinha um furo que a revisão
+# encontrou: entre a escrita do toml e o rename do sidecar existia uma janela em
+# que o par ficava dessincronizado, e o `trap EXIT` não cobre SIGTERM nem queda
+# de energia -- exatamente os dois casos para os quais este plugin existe.
+STAGING="$NAME-staging"
+STAGING_TOML="$SESSION_DIR/$STAGING.toml"
+STAGING_SIDECAR="$SESSION_DIR/$STAGING.titles.json"
+
+cleanup() { rm -f "$STAGING_TOML" "$STAGING_SIDECAR" "$SESSION_DIR/.$NAME.titles."*; }
+trap cleanup EXIT
+
 count_old="$(toml_windows "$TOML")"
 (( count_old >= 0 )) || { err "existing $NAME.toml does not parse -- treating as empty"; count_old=0; }
 
-# Back both files up before anything writes, and put them back on ANY failure
-# from here on. Without this, `set -e` firing after hyprresume has written
-# leaves a zeroed toml behind and never prints a word about it.
-backup="$(mktemp -d "$SESSION_DIR/.$NAME.backup.XXXXXX")"
-[[ -f "$TOML" ]] && cp -p "$TOML" "$backup/toml"
-[[ -f "$SIDECAR" ]] && cp -p "$SIDECAR" "$backup/sidecar"
+rm -f "$STAGING_TOML"
+hyprresume save "$STAGING" >/dev/null
 
-published=0
-rollback() {
-    local rc=$?
-    if (( ! published )); then
-        [[ -f "$backup/toml" ]] && mv -f "$backup/toml" "$TOML"
-        [[ -f "$backup/sidecar" ]] && mv -f "$backup/sidecar" "$SIDECAR"
-        (( rc == 0 || rc == 3 || rc == 4 )) || err "save failed (rc=$rc) -- previous session restored"
-    fi
-    rm -rf -- "$backup"
-}
-trap rollback EXIT
+count_new="$(toml_windows "$STAGING_TOML")"
 
-hyprresume save "$NAME" >/dev/null
-
-count_new="$(toml_windows "$TOML")"
-
-# The two rules. They cover different accidents and neither implies the other.
+# As duas regras. Cobrem acidentes diferentes e nenhuma implica a outra.
 #
-#   floor         never publish an empty session over a populated one. This is
-#                 the boot case: the desktop is not up yet, the save is faithful
-#                 to an empty screen, and publishing it erases yesterday's work.
-#   under-capture the save came out smaller than the screen it was taken from AND
-#                 smaller than what we already had -- a partial or failed write,
-#                 not a user who closed windows. Someone who really did close
-#                 windows produces count_new == count_screen, which publishes.
+#   piso           nunca publicar uma sessão vazia sobre uma populada. É o caso
+#                  do boot: a captura é fiel a uma tela que ainda não subiu, e
+#                  publicá-la apaga o trabalho de ontem.
+#   subcaptura     saiu menor que a tela de onde veio E menor que o que já
+#                  havia -- escrita parcial, não usuário fechando janelas. Quem
+#                  fechou de verdade produz count_new == count_screen.
 if (( count_new < 0 )); then
-    err "hyprresume produced a $NAME.toml that does not parse -- previous session kept"
+    err "hyprresume produced a session that does not parse -- previous session kept"
     exit 3
 fi
 if (( count_new == 0 && count_old > 0 )); then
@@ -126,21 +124,20 @@ if (( count_new < count_old && count_new < count_screen )); then
     exit 3
 fi
 
-# The sidecar is written from the SAME capture the guard was decided on, through
-# a temp file in the same directory: `> "$SIDECAR"` truncates when the shell
-# opens the redirect, so a jq that errors -- or a machine that dies mid-write,
-# which is the amdgpu case the short snapshot interval exists for -- leaves a
-# truncated file behind. The replay parses the sidecar without a try, so a
-# truncated one takes the whole restore down with a traceback.
-tmp_sidecar="$(mktemp "$SESSION_DIR/.$NAME.titles.XXXXXX")"
-# O nome do monitor, não o índice. `client.monitor` é uma posição na lista de
-# monitores daquele instante: desligar uma tela renumera todas as outras, e uma
-# sessão gravada com índices passa a descrever um arranjo que não existe mais.
-# O nome ("DP-1") é o que o compositor aceita de volta e o que uma pessoa lê.
-monitors="$(hyprctl monitors -j 2>/dev/null || echo '[]')"
+# Um selo igual nos dois arquivos. Dois renames não são uma transação, então em
+# vez de fingir que são, o par carrega de que geração cada metade veio e o
+# replay pode detectar um par rasgado em vez de restaurar meia sessão achando
+# que está inteira.
+GENERATION="$(date -u +%s%N)"
+printf '\n[omasession]\ngeneration = "%s"\n' "$GENERATION" >> "$STAGING_TOML"
 
-jq --arg when "$(date -u +%FT%TZ)" --argjson mons "$monitors" '{
+# O sidecar sai da MESMA leitura que decidiu o guard: contar de uma leitura e
+# gravar de outra deixa janelas aparecerem ou sumirem entre as duas, e decide o
+# guard sobre evidência diferente da que ele protege.
+monitors="$(hyprctl monitors -j 2>/dev/null || echo '[]')"
+jq --arg when "$(date -u +%FT%TZ)" --arg gen "$GENERATION" --argjson mons "$monitors" '{
     when: $when,
+    generation: $gen,
     monitors: [ $mons[]? | {id, name, description} ],
     windows: [ .[]
         | select(.mapped) | select(.workspace.id > 0)
@@ -150,21 +147,35 @@ jq --arg when "$(date -u +%FT%TZ)" --argjson mons "$monitors" '{
            monitor: .monitor,
            monitorName: (($mons[]? | select(.id == $w.monitor) | .name) // null),
            at, size, floating} ]
-}' <<<"$clients" > "$tmp_sidecar.raw"
+}' <<<"$clients" > "$STAGING_SIDECAR.raw"
 
-# O que o resolvedor consegue dizer AGORA, com os processos ainda vivos: o
-# diretório real de cada terminal, ou por que ele não é recuperável. Depois do
-# reboot essa informação não existe mais em lugar nenhum -- é preciso gravá-la
-# junto, e é ela que permite ao painel prometer só o que vai cumprir.
-python3 "$(dirname "${BASH_SOURCE[0]}")/annotate.py" "$tmp_sidecar.raw" > "$tmp_sidecar" \
-    2>/dev/null || mv -f "$tmp_sidecar.raw" "$tmp_sidecar"
-rm -f "$tmp_sidecar.raw"
-mv -f "$tmp_sidecar" "$SIDECAR"
+# O que só um processo vivo sabe dizer: o diretório real de cada terminal, ou
+# por que ele não é recuperável. Depois do reboot isso não existe em lugar
+# nenhum.
+python3 "$(dirname "${BASH_SOURCE[0]}")/annotate.py" "$STAGING_SIDECAR.raw" > "$STAGING_SIDECAR" \
+    2>/dev/null || mv -f "$STAGING_SIDECAR.raw" "$STAGING_SIDECAR"
+rm -f "$STAGING_SIDECAR.raw"
 
-# Only now is the pair consistent: both files describe the same capture, or
-# neither moved. A toml with six windows next to a sidecar with one is what
-# makes the replay report a restore it did not do.
-published=1
+# Durabilidade não é atomicidade, e o rename só garante a segunda. hyprresume
+# não faz fsync nenhum (nenhuma ocorrência no binário 0.5.0), então sem isto um
+# corte de energia logo após o save publica um arquivo cujo conteúdo ainda está
+# só no page cache -- e queda de energia é metade do motivo deste plugin.
+sync_file() { python3 -c '
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try: os.fsync(fd)
+finally: os.close(fd)' "$1" 2>/dev/null || true; }
+sync_file "$STAGING_TOML"
+sync_file "$STAGING_SIDECAR"
+
+# A geração anterior fica recuperável. Um par rasgado ou um restore que só
+# trouxe metade deixa de ser irreversível.
+[[ -f "$TOML" ]] && cp -p "$TOML" "$SESSION_DIR/$NAME.prev.toml"
+[[ -f "$SIDECAR" ]] && cp -p "$SIDECAR" "$SESSION_DIR/$NAME.prev.titles.json"
+
+mv -f "$STAGING_TOML" "$TOML"
+mv -f "$STAGING_SIDECAR" "$SIDECAR"
+sync_file "$SESSION_DIR"
 
 extra=""
 (( count_scratch > 0 )) && extra=", $count_scratch scratchpad window(s) not saved"
