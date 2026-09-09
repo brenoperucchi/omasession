@@ -21,12 +21,30 @@
 
 set -uo pipefail
 
-SAVE="${OMASESSION_SAVE:-$HOME/session-save-new.sh}"
+# Por padrão testa O CÓDIGO DESTE REPOSITÓRIO. A versão anterior apontava para
+# uma cópia solta no $HOME, então "16/16 ok" podia estar aprovando um arquivo
+# diferente do que seria commitado -- um teste verde sobre código que ninguém
+# leu é pior que nenhum teste.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SAVE="${OMASESSION_SAVE:-$SELF_DIR/lib/session-save.sh}"
+[[ -x "$SAVE" ]] || { echo "guard-cases: não encontrei $SAVE" >&2; exit 1; }
 S="$HOME/.local/share/hyprresume/sessions"
 STUB="$(mktemp -d)"
 BACKUP="$(mktemp -d)"
 KEEP=0
 [[ "${1:-}" == "--keep" ]] && KEEP=1
+
+# Freio. Este teste FECHA todas as janelas da sessão e sobrescreve a sessão
+# salva; rodá-lo na máquina de trabalho por engano custa o desktop inteiro.
+if [[ "${OMASESSION_TEST_I_MEAN_IT:-}" != "1" ]]; then
+    cat >&2 <<'WARN'
+guard-cases: este teste fecha TODAS as janelas abertas e sobrescreve a sessão
+salva. Ele é para o guest do lab, não para uma máquina em uso.
+
+  OMASESSION_TEST_I_MEAN_IT=1 ./guard-cases.sh
+WARN
+    exit 2
+fi
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "$XDG_RUNTIME_DIR/hypr" | head -1)}"

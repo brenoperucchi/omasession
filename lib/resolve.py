@@ -58,10 +58,23 @@ SINGLE_INSTANCE = {
 }
 
 
+def xdg(name: str, fallback: str) -> str:
+    """An XDG variable, treating empty as unset -- which the spec requires.
+
+    `os.environ.get(name, fallback)` returns "" for a variable that is set but
+    empty, and "".split(":") yields nothing usable. Measured: with an empty
+    XDG_DATA_DIRS the index drops from 139 entries to 32. That matters more than
+    it looks, because the resolver runs at login, which is exactly the context
+    where a minimal environment shows up.
+    """
+    value = os.environ.get(name, "")
+    return value if value.strip() else fallback
+
+
 def data_dirs() -> list[Path]:
     """XDG application directories, most specific first."""
-    home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
-    system = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+    home = Path(xdg("XDG_DATA_HOME", str(Path.home() / ".local/share")))
+    system = xdg("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
     dirs = [home] + [Path(p) for p in system.split(":") if p]
     # Flatpak exports live outside XDG_DATA_DIRS on some setups.
     dirs += [Path.home() / ".local/share/flatpak/exports/share",

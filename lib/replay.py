@@ -38,6 +38,10 @@ WINDOW_TIMEOUT = 15.0
 BROWSER_TIMEOUT = 40.0
 BROWSER_QUIET = 4.0     # no new window for this long = the browser is done
 SETTLE = 0.4
+
+# hl.dsp.window.fullscreen_state takes a mode, not a flag. Hyprland efb50993,
+# src/managers/fullscreen/FullscreenController.hpp:12-15.
+FS_NONE, FS_MAXIMIZED, FULLSCREEN = 0, 1, 2
 POLL = 0.25
 
 # Chromium-family browsers restore their own windows, tabs and history -- the
@@ -198,8 +202,15 @@ def place(addr: str, spec: dict) -> None:
 
     # Recorded by hyprresume and, until now, thrown away -- while the README
     # promised geometry came back identical.
+    #
+    # The mode number is not a boolean. In Hyprland efb50993,
+    # FullscreenController.hpp defines NONE=0, MAXIMIZED=1, FULLSCREEN=2, and
+    # the Lua dispatcher passes the number straight through: the first version
+    # of this line sent 1 and quietly maximized every window that had been
+    # fullscreen. hyprresume records a boolean, so true means fullscreen.
     if spec.get("fullscreen"):
-        dispatch("window.fullscreen_state", window=sel, internal=1, client=0)
+        dispatch("window.fullscreen_state", window=sel,
+                 internal=FULLSCREEN, client=FULLSCREEN)
         time.sleep(SETTLE)
 
     if not spec.get("floating"):
