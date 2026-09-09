@@ -105,6 +105,19 @@ for mode in partial garbage empty crash; do
     check "$mode: arquivos intactos"  "$before"  "$(fingerprint)"
 done
 
+echo "== o furo da regra antiga: uma sessao salva PEQUENA nao autoriza publicar pior"
+# old=1, screen=N, new=1 passava nas duas condicoes antigas e publicava uma
+# sessao de uma janela sobre uma tela cheia -- com o sidecar trazendo todas.
+close_all
+"$HOME/probe.sh" scenario >/dev/null 2>&1
+sleep 3
+printf '[session]\nname = "last"\n\n[[window]]\napp_id = "foot"\nlaunch_cmd = "foot"\nworkspace = "1"\n' > "$S/last.toml"
+rm -f "$S/last.titles.json"
+before="$(fingerprint)"
+STUB_MODE=partial PATH="$STUB:$PATH" "$SAVE" >/dev/null 2>&1; rc=$?
+check "com 1 salva e a tela cheia, recusa" "3" "$rc"
+check "e nao mexe nos arquivos"            "$before" "$(fingerprint)"
+
 echo "== encolhimento legitimo: quem fechou janelas de verdade tem de conseguir salvar"
 saved_before="$(toml_count)"
 for a in $(hyprctl clients -j | jq -r '.[]|select(.mapped)|select(.class!="foot")|.address'); do

@@ -105,12 +105,21 @@ count_new="$(toml_windows "$STAGING_TOML")"
 
 # As duas regras. Cobrem acidentes diferentes e nenhuma implica a outra.
 #
-#   piso           nunca publicar uma sessão vazia sobre uma populada. É o caso
-#                  do boot: a captura é fiel a uma tela que ainda não subiu, e
-#                  publicá-la apaga o trabalho de ontem.
-#   subcaptura     saiu menor que a tela de onde veio E menor que o que já
-#                  havia -- escrita parcial, não usuário fechando janelas. Quem
-#                  fechou de verdade produz count_new == count_screen.
+#   piso        nunca publicar uma sessão vazia sobre uma populada. É o caso do
+#               boot: a captura é fiel a uma tela que ainda não subiu, e
+#               publicá-la apaga o trabalho de ontem.
+#   cobertura   o que foi escrito tem de dar conta da tela de onde foi tirado.
+#
+# A regra de cobertura substitui uma anterior que comparava também com a
+# contagem já salva ("menor que a tela E menor que o que havia"). A revisão
+# achou o furo: com `old=1, screen=6, new=1` as duas condições falhavam e a
+# sessão de uma janela era publicada. Pior, o sidecar vem da mesma leitura e
+# teria as 6 -- um par carimbado com a mesma geração, coerente por selo e
+# incoerente por conteúdo. O selo daria ao defeito uma aparência de correção.
+#
+# Comparar só com a tela também resolve isso por construção: ou as duas metades
+# cobrem a mesma captura e publicam juntas, ou nada publica. E quem fechou
+# janelas de verdade continua salvando, porque aí count_new == count_screen.
 if (( count_new < 0 )); then
     err "hyprresume produced a session that does not parse -- previous session kept"
     exit 3
@@ -119,9 +128,16 @@ if (( count_new == 0 && count_old > 0 )); then
     err "refusing to overwrite $count_old saved window(s) with 0 (screen: $count_screen)"
     exit 3
 fi
-if (( count_new < count_old && count_new < count_screen )); then
-    err "refusing a partial save: $count_new window(s) written, $count_screen on screen, $count_old saved"
-    exit 3
+if (( count_new < count_screen )); then
+    err "refusing an incomplete save: $count_new window(s) written, $count_screen on screen"
+    # Escotilha, porque uma recusa permanente também é uma falha: se nesta
+    # máquina o hyprresume nunca dá conta de alguma janela, sem isto o usuário
+    # fica sem sessão nenhuma, o que é pior que uma sessão parcial declarada.
+    if [[ "${OMASESSION_ALLOW_PARTIAL:-}" != "1" ]]; then
+        err "  set OMASESSION_ALLOW_PARTIAL=1 to publish partial sessions on this machine"
+        exit 3
+    fi
+    err "  publishing anyway (OMASESSION_ALLOW_PARTIAL=1)"
 fi
 
 # Um selo igual nos dois arquivos. Dois renames não são uma transação, então em
