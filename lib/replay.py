@@ -556,66 +556,121 @@ def sidecar_for(toml: Path) -> Path:
     return Path(str(toml).removesuffix(".toml") + ".titles.json")
 
 
-def read_pair(toml: Path) -> tuple[list[dict], list[dict], str, str] | None:
-    """(windows, titles, toml generation, sidecar generation), or None."""
+def read_pair(toml: Path) -> dict:
+    """Everything needed to judge a pair, without judging it here.
+
+    `state` is one of:
+      ok        as tomls and sidecars go, this pair proves it belongs together
+      legacy    neither half is stamped -- written before generations existed,
+                so it cannot be proven, but it was never torn either
+      torn      the two halves came from different saves, or one is stamped and
+                the other is not, which means the unstamped one is stale
+      partial   the toml is fine and the sidecar is missing or unreadable
+      broken    the toml itself is missing or does not parse
+    """
+    result = {"state": "broken", "windows": [], "titles": [], "toml": toml}
     if not toml.is_file():
-        return None
+        result["why"] = "no session file"
+        return result
     try:
         doc = tomllib.loads(toml.read_text())
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    windows = doc.get("window", [])
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        result["why"] = f"session file does not parse: {exc}"
+        return result
+
+    result["windows"] = doc.get("window", [])
     gen_toml = str(doc.get("omasession", {}).get("generation", ""))
 
-    titles: list[dict] = []
-    gen_side = ""
     side = sidecar_for(toml)
-    if side.is_file():
-        try:
-            data = json.loads(side.read_text())
-            titles = data.get("windows", [])
-            gen_side = str(data.get("generation", ""))
-        except (OSError, json.JSONDecodeError):
-            titles, gen_side = [], ""
-    return windows, titles, gen_toml, gen_side
+    if not side.is_file():
+        result["state"] = "partial"
+        result["why"] = "no title sidecar"
+        return result
+    try:
+        data = json.loads(side.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        result["state"] = "partial"
+        result["why"] = f"sidecar does not parse: {exc}"
+        return result
+
+    result["titles"] = data.get("windows", [])
+    gen_side = str(data.get("generation", ""))
+
+    # Um par declarado parcial tem selos iguais e coberturas diferentes: o
+    # sidecar descreve a tela inteira, o toml só o que o writer conseguiu. Casar
+    # títulos contra esse subconjunto atribui janelas de browser a slots que não
+    # existem, então os títulos são descartados e a razão é dita.
+    if data.get("partial"):
+        written = data.get("windowsWritten")
+        result["partial"] = True
+        result["partial_why"] = (
+            f"saved as partial ({written} of {len(result['titles'])} windows "
+            f"were written); titles cover more than the session does")
+
+    if gen_toml and gen_side:
+        result["state"] = "ok" if gen_toml == gen_side else "torn"
+        if result["state"] == "torn":
+            result["why"] = f"different saves ({gen_toml} vs {gen_side})"
+    elif not gen_toml and not gen_side:
+        # Par escrito antes de existirem gerações. Não é demonstrável, mas
+        # também nunca passou por uma publicação em duas metades.
+        result["state"] = "legacy"
+    else:
+        # Uma metade selada e a outra não: a que não tem selo ficou para trás de
+        # uma publicação interrompida. Aceitar isso restauraria as janelas de uma
+        # captura com os títulos de outra.
+        result["state"] = "torn"
+        result["why"] = ("one half is stamped and the other is not; "
+                         "the unstamped half is stale")
+    return result
 
 
 def load_pair(path: Path) -> tuple[list[dict], list[dict], Path]:
-    """The session to restore, preferring a pair that agrees with itself.
+    """The session to restore, preferring a pair that proves it is one.
 
     Publishing is two renames, and two renames are not a transaction. Rather
-    than pretend otherwise, both halves carry the generation they came from: a
-    crash between the two leaves a toml from one save beside a sidecar from
-    another, and restoring that silently mixes two sessions -- browser windows
-    matched against titles that belong to a different capture. When the stamps
-    disagree, the previous generation is used, because a slightly older session
-    that is internally consistent beats a current one that is not.
+    than pretend otherwise, both halves carry the generation they came from, and
+    anything that is not demonstrably one capture falls back to the previous
+    generation. A slightly older session that is internally consistent beats a
+    current one that is not: restoring a torn pair matches browser windows
+    against titles from a different capture and silently mixes two sessions.
+
+    Returning an empty session here would be worse than failing. An earlier
+    version did exactly that for an unparseable toml -- it returned no windows,
+    never looked at the previous generation, and main() reported `0/0 placed`
+    and exited 0. Reporting success it never earned is the failure this whole
+    project exists to catch, so `usable` is what the caller checks.
     """
     current = read_pair(path)
-    if current is None:
-        print(f"no session file at {path}", file=sys.stderr)
+    prev_path = Path(str(path).removesuffix(".toml") + ".prev.toml")
+
+    if current["state"] in ("ok", "legacy") and current.get("partial"):
+        print(f"! {path.name}: {current['partial_why']}")
+        return current["windows"], [], sidecar_for(path)
+
+    if current["state"] in ("ok", "legacy"):
+        if current["titles"]:
+            print(f"title sidecar: {len(current['titles'])} window(s) "
+                  f"from {sidecar_for(path).name}")
+        return current["windows"], current["titles"], sidecar_for(path)
+
+    print(f"! {path.name}: {current.get('why', current['state'])}")
+
+    # Qualquer estado não demonstrável tenta a geração anterior -- inclusive
+    # toml quebrado e sidecar ausente, não só selos divergentes.
+    previous = read_pair(prev_path)
+    if previous["state"] in ("ok", "legacy") and previous["windows"]:
+        print(f"  using the previous generation from {prev_path.name} instead "
+              f"({len(previous['windows'])} window(s))")
+        return previous["windows"], previous["titles"], sidecar_for(prev_path)
+
+    if current["state"] == "broken":
+        print("  and no usable previous generation -- nothing to restore",
+              file=sys.stderr)
         return [], [], sidecar_for(path)
 
-    windows, titles, gen_toml, gen_side = current
-    torn = bool(gen_toml) and bool(gen_side) and gen_toml != gen_side
-    if torn:
-        print(f"! {path.name} and its sidecar come from different saves "
-              f"({gen_toml} vs {gen_side}) -- the pair was published torn")
-        prev = Path(str(path).removesuffix(".toml") + ".prev.toml")
-        fallback = read_pair(prev)
-        if fallback and (not fallback[2] or not fallback[3]
-                         or fallback[2] == fallback[3]):
-            print(f"  using the previous generation from {prev.name} instead")
-            return fallback[0], fallback[1], sidecar_for(prev)
-        print("  no consistent previous generation; continuing with titles dropped")
-        titles = []
-
-    side = sidecar_for(path)
-    if titles:
-        print(f"title sidecar: {len(titles)} window(s) from {side.name}")
-    elif not side.is_file():
-        print("no title sidecar -- browser windows cannot be told apart")
-    return windows, titles, side
+    print("  no consistent previous generation; restoring windows without titles")
+    return current["windows"], [], sidecar_for(path)
 
 
 def main() -> int:
@@ -625,6 +680,9 @@ def main() -> int:
         return 1
 
     windows, titles, sidecar = load_pair(path)
+    if not windows:
+        print("nothing to restore", file=sys.stderr)
+        return 1
 
     print(f"restoring {len(windows)} window(s) from {path}\n")
 

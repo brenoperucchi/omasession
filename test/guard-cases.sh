@@ -26,6 +26,7 @@ set -uo pipefail
 # diferente do que seria commitado -- um teste verde sobre código que ninguém
 # leu é pior que nenhum teste.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export REPLAY="$SELF_DIR/lib/replay.py"
 SAVE="${OMASESSION_SAVE:-$SELF_DIR/lib/session-save.sh}"
 [[ -x "$SAVE" ]] || { echo "guard-cases: não encontrei $SAVE" >&2; exit 1; }
 S="$HOME/.local/share/hyprresume/sessions"
@@ -143,21 +144,59 @@ sleep 3
 "$SAVE" >/dev/null
 gen_toml() { sed -n 's/^generation = "\(.*\)"/\1/p' "$S/last.toml" | tail -1; }
 gen_side() { jq -r '.generation // ""' "$S/last.titles.json" 2>/dev/null; }
+pair_whole() {
+    local t="$1" j="${1%.toml}.titles.json"
+    [[ -f "$t" && -f "$j" ]] || return 1
+    [[ "$(sed -n 's/^generation = "\(.*\)"/\1/p' "$t" | tail -1)" \
+       == "$(jq -r '.generation // ""' "$j" 2>/dev/null)" ]]
+}
 check "as duas metades carregam a mesma geracao" "$(gen_toml)" "$(gen_side)"
 check "a geracao anterior fica recuperavel" "sim" \
       "$([ -f "$S/last.prev.toml" ] && echo sim || echo nao)"
 
-torn=0
-for i in $(seq 1 8); do
+# Mata DETERMINISTICAMENTE na janela entre os dois renames. O modo aleatório
+# abaixo quase nunca cai nela -- são microssegundos -- então sem este caso o
+# caminho do par rasgado é uma afirmação, não uma garantia. A revisão apontou
+# que ele era o único caminho novo da rodada sem asserção.
+close_all
+"$HOME/probe.sh" scenario >/dev/null 2>&1
+sleep 3
+"$SAVE" >/dev/null                      # geração A, inteira
+gen_a="$(gen_toml)"
+OMASESSION_TEST_PAUSE_BETWEEN_MV=3 "$SAVE" >/dev/null 2>&1 &
+bg=$!
+sleep 1.5                               # dentro da pausa: toml novo, sidecar velho
+kill -KILL "$bg" 2>/dev/null
+wait "$bg" 2>/dev/null
+check "matando entre os renames, o par fica rasgado" "sim" \
+      "$([[ "$(gen_toml)" != "$(gen_side)" ]] && echo sim || echo nao)"
+check "e a geracao anterior sobreviveu inteira" "sim" \
+      "$(pair_whole "$S/last.prev.toml" && echo sim || echo nao)"
+restored="$("$SELF_DIR/test/recoverable.py" "$S/last.toml" 2>/dev/null)"
+check "o replay recupera a geracao anterior, nao meia sessao" "sim" \
+      "$([[ "${restored:-0}" -gt 0 ]] && echo sim || echo nao)"
+
+# devolve o diretorio a um estado inteiro para os casos seguintes
+"$SAVE" >/dev/null 2>&1
+
+kills=8
+recoverable=0
+for i in $(seq 1 $kills); do
     ( "$SAVE" >/dev/null 2>&1 ) &
     bg=$!
     python3 -c "import time,random; time.sleep(random.uniform(0.05,0.9))"
     if (( i % 2 )); then kill -KILL "$bg" 2>/dev/null; else kill -TERM "$bg" 2>/dev/null; fi
     wait "$bg" 2>/dev/null
-    [[ "$(gen_toml)" == "$(gen_side)" ]] || torn=$((torn+1))
+    n="$("$SELF_DIR/test/recoverable.py" "$S/last.toml" 2>/dev/null)"
+    [[ "${n:-0}" -gt 0 ]] && recoverable=$((recoverable+1))
 done
-check "8 mortes no meio do save, nenhum par rasgado" "0" "$torn"
-check "nenhum staging orfao" "0" "$(ls "$S"/*staging* 2>/dev/null | wc -l)"
+# A asserção anterior ("nenhum par rasgado") exigia do mecanismo uma promessa
+# que ele nunca fez: com um kill entre os dois renames o par RASGA, e é para
+# isso que existe o selo. O que tem de valer sempre é que uma sessão utilizável
+# continue recuperável -- rasgada ou não.
+check "apos $kills mortes, sempre sobra sessao recuperavel" "$kills" "$recoverable"
+check "stagings orfaos sao varridos na execucao seguinte" "0" \
+      "$("$SAVE" >/dev/null 2>&1; ls "$S"/omasession.staging.* 2>/dev/null | wc -l)"
 
 echo "== lock: dois saves nao se sobrepoem"
 flock -x "$S/.last.lock" -c "sleep 5" &

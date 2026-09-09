@@ -51,6 +51,7 @@ TOML="$SESSION_DIR/$NAME.toml"
 SIDECAR="$SESSION_DIR/$NAME.titles.json"
 
 say() { printf 'session-save: %s\n' "$*"; }
+die() { printf 'session-save: %s\n' "$*" >&2; exit 1; }
 err() { printf 'session-save: %s\n' "$*" >&2; }
 
 mkdir -p "$SESSION_DIR"
@@ -101,12 +102,32 @@ PY
 # encontrou: entre a escrita do toml e o rename do sidecar existia uma janela em
 # que o par ficava dessincronizado, e o `trap EXIT` não cobre SIGTERM nem queda
 # de energia -- exatamente os dois casos para os quais este plugin existe.
-STAGING="$NAME-staging"
+# Nomes internos vivem num namespace que o usuário não pode escolher. Antes o
+# staging era "$NAME-staging" no mesmo espaço público: depois de `save
+# work-staging`, um `save work` apagava e sobrescrevia aquela sessão do usuário
+# com o próprio staging. Os locks eram diferentes e o arquivo era o mesmo.
+case "$NAME" in
+    omasession.*|*.prev)
+        die "'$NAME' is reserved for internal use"
+        ;;
+esac
+STAGING="omasession.staging.$NAME.$$"
 STAGING_TOML="$SESSION_DIR/$STAGING.toml"
 STAGING_SIDECAR="$SESSION_DIR/$STAGING.titles.json"
 
 cleanup() { rm -f "$STAGING_TOML" "$STAGING_SIDECAR" "$SESSION_DIR/.$NAME.titles."*; }
 trap cleanup EXIT
+
+# Varre stagings órfãos de execuções que morreram sem rodar o trap -- SIGKILL e
+# queda de energia não rodam trap nenhum. São inertes (nada os lê), mas
+# acumulariam para sempre, e um diretório cheio de restos esconde o estado real.
+# Só remove os que não pertencem a um processo vivo.
+for stale in "$SESSION_DIR"/omasession.staging.*; do
+    [[ -e "$stale" ]] || continue
+    stale_pid="${stale##*.}"; stale_pid="${stale_pid%%.*}"
+    [[ "$stale" =~ \.([0-9]+)\.(toml|titles\.json)$ ]] || continue
+    kill -0 "${BASH_REMATCH[1]}" 2>/dev/null || rm -f "$stale"
+done
 
 count_old="$(toml_windows "$TOML")"
 (( count_old >= 0 )) || { err "existing $NAME.toml does not parse -- treating as empty"; count_old=0; }
@@ -151,12 +172,14 @@ if (( count_new < count_screen )); then
         exit 3
     fi
     err "  publishing anyway (OMASESSION_ALLOW_PARTIAL=1)"
+    PARTIAL=1
 fi
 
 # Um selo igual nos dois arquivos. Dois renames não são uma transação, então em
 # vez de fingir que são, o par carrega de que geração cada metade veio e o
 # replay pode detectar um par rasgado em vez de restaurar meia sessão achando
 # que está inteira.
+PARTIAL="${PARTIAL:-0}"
 GENERATION="$(date -u +%s%N)"
 printf '\n[omasession]\ngeneration = "%s"\n' "$GENERATION" >> "$STAGING_TOML"
 
@@ -164,9 +187,18 @@ printf '\n[omasession]\ngeneration = "%s"\n' "$GENERATION" >> "$STAGING_TOML"
 # gravar de outra deixa janelas aparecerem ou sumirem entre as duas, e decide o
 # guard sobre evidência diferente da que ele protege.
 monitors="$(hyprctl monitors -j 2>/dev/null || echo '[]')"
-jq --arg when "$(date -u +%FT%TZ)" --arg gen "$GENERATION" --argjson mons "$monitors" '{
+# `partial` viaja com o par. Sem isto a escotilha publicava um toml de uma
+# janela ao lado de um sidecar de seis, os dois com o mesmo selo -- o "coerente
+# por selo e incoerente por conteúdo" que esta rodada acabou de identificar como
+# o pior caso, reintroduzido pela própria escotilha. Quem lê precisa saber que a
+# cobertura das duas metades não é a mesma.
+jq --arg when "$(date -u +%FT%TZ)" --arg gen "$GENERATION" \
+   --argjson partial "$PARTIAL" --argjson written "$count_new" \
+   --argjson mons "$monitors" '{
     when: $when,
     generation: $gen,
+    partial: ($partial == 1),
+    windowsWritten: $written,
     monitors: [ $mons[]? | {id, name, description} ],
     windows: [ .[]
         | select(.mapped) | select(.workspace.id > 0)
@@ -189,23 +221,59 @@ rm -f "$STAGING_SIDECAR.raw"
 # não faz fsync nenhum (nenhuma ocorrência no binário 0.5.0), então sem isto um
 # corte de energia logo após o save publica um arquivo cujo conteúdo ainda está
 # só no page cache -- e queda de energia é metade do motivo deste plugin.
-sync_file() { python3 -c '
+#
+# E a falha do fsync IMPEDE publicar. A versão anterior a engolia com `|| true`
+# e publicava assim mesmo, anunciando uma durabilidade que não tinha conseguido:
+# ENOSPC ou EIO reportado no flush virava sucesso silencioso.
+sync_path() {
+    python3 -c '
 import os, sys
 fd = os.open(sys.argv[1], os.O_RDONLY)
-try: os.fsync(fd)
-finally: os.close(fd)' "$1" 2>/dev/null || true; }
-sync_file "$STAGING_TOML"
-sync_file "$STAGING_SIDECAR"
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)' "$1"
+}
+if ! sync_path "$STAGING_TOML" || ! sync_path "$STAGING_SIDECAR"; then
+    err "could not flush the new session to disk -- not publishing it"
+    exit 3
+fi
 
-# A geração anterior fica recuperável. Um par rasgado ou um restore que só
-# trouxe metade deixa de ser irreversível.
-[[ -f "$TOML" ]] && cp -p "$TOML" "$SESSION_DIR/$NAME.prev.toml"
-[[ -f "$SIDECAR" ]] && cp -p "$SIDECAR" "$SESSION_DIR/$NAME.prev.titles.json"
+# A geração anterior só é substituída por um par que se prova inteiro. A versão
+# anterior copiava incondicionalmente: se uma publicação morresse entre os dois
+# renames, a tentativa seguinte promovia esse par RASGADO a `.prev` e destruía
+# o único fallback bom que existia.
+pair_is_whole() {
+    local toml="$1" side="${1%.toml}.titles.json"
+    [[ -f "$toml" && -f "$side" ]] || return 1
+    local gt gs
+    gt="$(sed -n 's/^generation = "\(.*\)"/\1/p' "$toml" | tail -1)"
+    gs="$(jq -r '.generation // ""' "$side" 2>/dev/null)" || return 1
+    [[ "$gt" == "$gs" ]]
+}
+
+if pair_is_whole "$TOML"; then
+    cp -p "$TOML" "$SESSION_DIR/$NAME.prev.toml"
+    cp -p "$SIDECAR" "$SESSION_DIR/$NAME.prev.titles.json"
+    sync_path "$SESSION_DIR/$NAME.prev.toml" || true
+    sync_path "$SESSION_DIR/$NAME.prev.titles.json" || true
+elif [[ -f "$TOML" ]]; then
+    err "the session being replaced is not a whole pair -- keeping the older fallback"
+fi
 
 mv -f "$STAGING_TOML" "$TOML"
+# Ponto de pausa determinístico: a janela entre os dois renames dura
+# microssegundos, e um kill em instante aleatório praticamente nunca cai nela.
+# Sem isto o caminho do par rasgado não é testável, e um caminho não testado é
+# uma afirmação, não uma garantia.
+[[ -n "${OMASESSION_TEST_PAUSE_BETWEEN_MV:-}" ]] && sleep "$OMASESSION_TEST_PAUSE_BETWEEN_MV"
 mv -f "$STAGING_SIDECAR" "$SIDECAR"
-sync_file "$SESSION_DIR"
+sync_path "$SESSION_DIR" || err "published, but the directory flush failed -- durability uncertain"
 
 extra=""
 (( count_scratch > 0 )) && extra=", $count_scratch scratchpad window(s) not saved"
-say "$NAME -- $count_new window(s) + titles$extra"
+if (( PARTIAL )); then
+    say "$NAME -- PARTIAL: $count_new of $count_screen window(s) written$extra"
+else
+    say "$NAME -- $count_new window(s) + titles$extra"
+fi
