@@ -16,13 +16,19 @@ Omarchy 4.
 
 ## Why a new plugin
 
-Every session-restore tool for Hyprland drives the compositor with the pre-Lua
+The tools that predate Omarchy 4 drive the compositor with the pre-Lua
 `hyprctl dispatch exec` / `keyword windowrule` syntax. On a Lua-configured
 Hyprland 0.56 — the Omarchy 4 default — that syntax is rejected, and rejected
-*silently*: the tool reports success against an empty desktop.
+*silently*: the tool reports success against an empty desktop. Measured on a
+6-window session, hyprresume 0.5.0 restores **0 of 6** in 150 seconds and prints
+`restore complete: 6/6 apps (0 failed)`.
 
-Measured on a 6-window session, hyprresume 0.5.0 restores **0 of 6** in 150
-seconds and prints `restore complete: 6/6 apps (0 failed)`.
+That is no longer the whole story, and this README used to claim it was.
+`dimef.omaresume`, published to the plugin marketplace on 2026-09-08, speaks the
+same Lua dispatcher API. Speaking the API the compositor accepts is table
+stakes, not a differentiator. What separates this plugin is below: it resolves
+arbitrary applications instead of a fixed list, and it knows what the browser
+actually needs in order to give its tabs back.
 
 | | hyprresume 0.5.0 | OmaSession |
 |---|---|---|
@@ -31,8 +37,24 @@ seconds and prints `restore complete: 6/6 apps (0 failed)`.
 | after a real reboot | 0/6 | **5/5 in 5s** |
 
 Geometry, floating state and a terminal's working directory come back identical.
-OmaSession speaks the API the compositor actually accepts —
-`hl.dispatch(hl.dsp.*)`.
+## Any application, not a list of eight
+
+A session restorer has to answer one question per window: what command brings
+this back? The usual answer is a table of known applications — four terminals,
+four browsers — and anything else needs the user to write out an `argv` by hand,
+or it simply does not come back.
+
+`lib/resolve.py` answers it from the system instead: the `.desktop` index
+(matched on `StartupWMClass` or entry id, with `Exec=` field codes stripped),
+the systemd scope for Flatpaks, `/proc/cmdline` as a last resort, and the
+terminal's real working directory. Measured by closing everything and
+relaunching **only** from the resolved command: 4/4 in the lab, and 19/19
+against a real 19-window desktop. `omasession resolve` prints which path each
+window took, because a resolver that is wrong looks exactly like an application
+that failed to open.
+
+A window it cannot resolve is reported as such — before the reboot, in the
+panel, not discovered afterwards.
 
 ## Browser tabs come back too, and the reason is not what we assumed
 

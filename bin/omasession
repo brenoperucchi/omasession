@@ -116,6 +116,24 @@ cmd_restore() {
     hypr_env || die "no Hyprland instance -- nothing to restore into"
     [[ -f "$SESSION_DIR/$name.toml" ]] || die "no saved session at $SESSION_DIR/$name.toml"
 
+    # O restore toma o MESMO lock que o save, e o segura ate o fim.
+    #
+    # Sem isto os dois correm: restaurando 6 janelas, se o timer dispara com 1
+    # na tela, o guard ve count_old=6, count_screen=1, count_new=1 -- e as duas
+    # regras deixam publicar, porque "a tela encolheu" e um encolhimento
+    # legitimo do ponto de vista dele. O proprio fluxo recem-instalado
+    # substituiria a sessao completa pela parcialmente restaurada. Achado da
+    # rodada 2; o guard sozinho nao podia ver a diferenca, porque a informacao
+    # que falta ("estamos no meio de um restore") nao esta na tela.
+    #
+    # `exec` abaixo troca este shell pelo replay, mas o descritor 9 sobrevive a
+    # troca: o lock fica seguro pelo processo do replay e e liberado quando ele
+    # termina, inclusive se ele morrer.
+    exec 9>"$SESSION_DIR/.$name.lock"
+    if ! flock -n 9; then
+        die "a save is running -- refusing to restore on top of it"
+    fi
+
     # browserRestore ainda nao e respeitado: replay.py nao le a opcao. Dizer
     # isso e melhor que exportar uma variavel que ninguem consome -- uma opcao
     # que finge funcionar e exatamente o defeito que este projeto existe para

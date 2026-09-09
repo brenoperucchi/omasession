@@ -25,8 +25,10 @@ import difflib
 import json
 import shlex
 import re
+import os
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -65,21 +67,26 @@ BROWSERS = {
     "chromium": {
         "profile": "~/.config/chromium/Default/Preferences",
         "binary": "chromium",
+        "comm": "chromium",
         "policy_dir": "/etc/chromium/policies/managed",
     },
     "google-chrome": {
         "profile": "~/.config/google-chrome/Default/Preferences",
         "binary": "google-chrome-stable",
+        # O processo se chama `chrome`, nao `google-chrome-stable`.
+        "comm": "chrome",
         "policy_dir": "/etc/opt/chrome/policies/managed",
     },
     "brave-browser": {
         "profile": "~/.config/BraveSoftware/Brave-Browser/Default/Preferences",
         "binary": "brave",
+        "comm": "brave",
         "policy_dir": "/etc/brave/policies/managed",
     },
     "vivaldi-stable": {
         "profile": "~/.config/vivaldi/Default/Preferences",
         "binary": "vivaldi-stable",
+        "comm": "vivaldi-bin",
         "policy_dir": "/etc/vivaldi/policies/managed",
     },
 }
@@ -347,36 +354,94 @@ def browser_major_version(binary: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def arm_browser_profile(app: str) -> bool:
-    """Make the profile restore silently on the next launch.
+def profile_in_use(prefs: Path, comm_name: str) -> bool:
+    """Is a browser running against the profile we are about to rewrite?
 
-    Everything here is user-owned; the root-owned half (the promo policy) is
-    installed once by browser-setup.sh. If that half is missing we say so
-    rather than fail quietly, because the symptom -- an onboarding tab where
-    the session should be -- looks nothing like its cause.
+    A live Chromium holds its preferences in memory and writes them out on exit,
+    so editing the file underneath it is either lost or interleaved -- and the
+    file we would be clobbering is the one every restore depends on.
+
+    Matched on /proc/<pid>/comm, never on the command line. The first version of
+    this matched the string anywhere in argv and reported "chromium is running"
+    against a stopped browser, because the argv it matched was its own: the
+    exact shape of the `pkill -f` mistake this project documents in plan 001.
+    """
+    root = str(prefs.parent.parent)
+    me = os.getpid()
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            pid = int(proc.name)
+            if pid == me or proc.stat().st_uid != os.getuid():
+                continue
+            if proc.joinpath("comm").read_text().strip() != comm_name:
+                continue
+            argv = proc.joinpath("cmdline").read_bytes().decode("utf-8", "replace")
+        except (OSError, ValueError):
+            continue
+        # A browser on another profile is none of our business.
+        if "--user-data-dir" not in argv or root in argv:
+            return True
+    return False
+
+
+def arm_browser_profile(app: str) -> bool:
+    """Make the profile restore its own session on the next launch.
+
+    This is the single most important write in the whole restore, and it took a
+    measurement to learn that. With `exit_type` left as the teardown wrote it,
+    the same snapshot reopens 0 of 3 tabs; with it set to "Normal", 3 of 3 --
+    and `--restore-last-session` does NOT substitute for it (measured
+    2026-09-09: 0/3 with the flag alone on a Crashed profile, 3/3 with the flag
+    plus this write). See docs/plans/001-RESULTADO.md.
+
+    Because everything depends on it, it is also the most dangerous write: a
+    truncated Preferences makes Chromium rebuild the profile from scratch --
+    bookmarks, extensions, all of it. Hence tempfile + os.replace, and a
+    refusal when the browser is running.
     """
     spec = BROWSERS[app]
     prefs = Path(spec["profile"]).expanduser()
     if not prefs.is_file():
         return False
 
+    if profile_in_use(prefs, spec.get("comm", spec["binary"])):
+        print(f"  ! {app} is running; not touching its Preferences. "
+              f"Close it first or its tabs will not come back.")
+        return False
+
     policy = Path(spec["policy_dir"]) / "omasession-no-promo.json"
     if app == "google-chrome" and not policy.is_file():
         print(f"  ! {policy} missing -- Chrome may show onboarding instead of "
-              f"restoring (run browser-setup.sh once, as root)")
+              f"restoring (run browser-setup once, as root)")
 
     try:
         data = json.loads(prefs.read_text())
-        # Restore the previous session, and let it happen without a click.
-        data.setdefault("session", {})["restore_on_startup"] = 1
+        # `restore_on_startup` is deliberately NOT written: DESIGN.md §5 records
+        # it as ignored, and writing into a preference the browser tracks buys
+        # nothing while enlarging the blast radius of this write. The policy
+        # file carries it. What we do write is what the measurement showed
+        # actually decides the outcome.
         data.setdefault("profile", {})["exit_type"] = "Normal"
         data["profile"]["exited_cleanly"] = True
-        # Mark the current milestone as already seen. Re-read every time: the
-        # browser updates itself, and a stale value brings the promo tab back.
+        # Mark the current milestone as seen. Re-read every time: the browser
+        # updates itself, and a stale value brings the promo tab back.
         major = browser_major_version(spec["binary"])
         if major is not None:
             data.setdefault("browser", {})["last_whats_new_version"] = major
-        prefs.write_text(json.dumps(data))
+
+        # Atomic: same directory, then replace. A crash mid-write used to leave
+        # a truncated Preferences behind, and this code runs at login on a
+        # machine whose GPU lockups are why the snapshot interval is short.
+        fd, tmp = tempfile.mkstemp(dir=str(prefs.parent), prefix=".omasession-")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(data, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, prefs)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
         return True
     except (OSError, json.JSONDecodeError) as exc:
         print(f"  ! could not arm {app} profile: {exc}")
