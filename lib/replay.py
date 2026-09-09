@@ -23,6 +23,7 @@ Proof-of-concept for the Omarchy session plugin, not the plugin itself.
 
 import difflib
 import json
+import shlex
 import re
 import subprocess
 import sys
@@ -51,6 +52,15 @@ POLL = 0.25
 #     stop it; the policy from browser-setup.sh plus last_whats_new_version do.
 #
 # Keyed by the window class Hyprland reports.
+# Terminals take their working directory as an argument; hyprresume records the
+# cwd but never replays it. Keyed by the class Hyprland reports.
+TERMINAL_CWD_FLAG = {
+    "foot": "--working-directory",
+    "Alacritty": "--working-directory",
+    "kitty": "--directory",
+    "com.mitchellh.ghostty": "--working-directory",
+}
+
 BROWSERS = {
     "chromium": {
         "profile": "~/.config/chromium/Default/Preferences",
@@ -86,6 +96,66 @@ def hypr(lua: str) -> str:
     return (out.stdout + out.stderr).strip()
 
 
+def lua(value) -> str:
+    """Encode a Python value as a Lua literal.
+
+    Every dispatcher argument reaches the compositor through this. The previous
+    version interpolated straight into an f-string, which broke on the first
+    directory containing a space and, worse, let a quote or a backslash close
+    the Lua string early -- a rejection Hyprland does not report back, which is
+    the exact failure mode this project exists to catch.
+
+    Strings become decimal escapes, three digits per UTF-8 byte. That is
+    unambiguous by construction: no quote, backslash, newline or `]]` inside the
+    value can terminate the literal, so there is nothing left to get wrong.
+    Long-bracket syntax (`[[...]]`) would not do -- it can be closed by a `]]`
+    in the value, it swallows a leading newline, and it offers no protection at
+    all on the shell side of exec_cmd.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return '"' + "".join(f"\\{b:03d}" for b in value.encode()) + '"'
+    if isinstance(value, dict):
+        return "{" + ",".join(f"[{lua(k)}]={lua(v)}" for k, v in value.items()) + "}"
+    raise ValueError(f"cannot encode {value!r} as Lua")
+
+
+def dispatch(method: str, *positional, **args) -> str:
+    """hl.dispatch(hl.dsp.<method>(...)) with every argument encoded.
+
+    Two calling conventions, and getting them backwards fails silently:
+    `hl.dsp.exec_cmd` takes ONE positional string, while the window and focus
+    dispatchers take a table. Passing a table to exec_cmd launches nothing and
+    Hyprland reports no error -- which is how a refactor of this function
+    disabled every relaunch here without a single failing line of output.
+    """
+    if positional:
+        if args:
+            raise ValueError("dispatcher takes positional or table args, not both")
+        body = ",".join(lua(v) for v in positional)
+    else:
+        body = "{" + ",".join(f"{k}={lua(v)}" for k, v in args.items()) + "}"
+    return hypr(f"hl.dispatch(hl.dsp.{method}({body}))")
+
+
+def workspace_arg(workspace):
+    """What hl.dsp.*.move accepts for a workspace.
+
+    hyprresume records the workspace as a string ("3"), so the old
+    `workspace={ws}` happened to emit a bare number and worked -- by accident.
+    A named workspace would have emitted `workspace=my-notes`, which is a Lua
+    syntax error, silently. Numbers stay numbers; anything else is a name, and
+    special workspaces keep their `special:` prefix.
+    """
+    text = str(workspace)
+    if text.lstrip("-").isdigit():
+        return int(text)
+    return text if text.startswith("special:") else f"name:{text}"
+
+
 def clients() -> list[dict]:
     try:
         out = subprocess.run(
@@ -113,27 +183,33 @@ def find_new(known: set[str], timeout: float):
 
 def place(addr: str, spec: dict) -> None:
     """Put an already-mapped window where the session file says it belongs."""
-    sel = f'window="address:{addr}"'
+    sel = f"address:{addr}"
     ws = spec.get("workspace")
     if ws is not None:
-        hypr(f"hl.dispatch(hl.dsp.window.move{{{sel}, workspace={ws}}})")
+        dispatch("window.move", window=sel, workspace=workspace_arg(ws))
+        time.sleep(SETTLE)
+
+    # Recorded by hyprresume and, until now, thrown away -- while the README
+    # promised geometry came back identical.
+    if spec.get("fullscreen"):
+        dispatch("window.fullscreen_state", window=sel, internal=1, client=0)
         time.sleep(SETTLE)
 
     if not spec.get("floating"):
         return
 
-    hypr(f"hl.dispatch(hl.dsp.window.float{{{sel}}})")
+    dispatch("window.float", window=sel, action="on")
     time.sleep(SETTLE)
     size = spec.get("size") or [None, None]
     pos = spec.get("position") or [None, None]
     if size[0] and size[1]:
-        hypr(
-            f"hl.dispatch(hl.dsp.window.resize{{{sel}, "
-            f"x={size[0]}, y={size[1]}, exact=true}})"
-        )
+        dispatch("window.resize", window=sel, x=size[0], y=size[1], exact=True)
         time.sleep(SETTLE)
     if pos[0] is not None and pos[1] is not None:
-        hypr(f"hl.dispatch(hl.dsp.window.move{{{sel}, x={pos[0]}, y={pos[1]}}})")
+        # exact=true here too: probe.sh sets positions with it and resize above
+        # already used it, so without it the saved coordinates were being
+        # applied under a different meaning than the one they were measured in.
+        dispatch("window.move", window=sel, x=pos[0], y=pos[1], exact=True)
         time.sleep(SETTLE)
 
 
@@ -156,12 +232,22 @@ def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
 
     # A terminal's cwd is recorded but never replayed by hyprresume; foot takes
     # it as an argument, so put it back on the command line.
+    # Two layers, and the Lua encoder only covers one of them: exec_cmd hands
+    # the string to `sh -c`, so a directory containing `;` or `$(...)` runs
+    # regardless of how the Lua literal was written. shlex.quote is what makes
+    # the shell side safe -- and it is also what makes a plain space work, which
+    # is the failure anyone hits first with a folder named "my project".
+    #
+    # The option goes BEFORE any `--`: hyprresume records terminals as
+    # `foot -- btop`, and appending after the separator hands the flag to btop.
     cwd = spec.get("cwd")
-    if cwd and app == "foot" and "--working-directory" not in cmd:
-        cmd = f"{cmd} --working-directory={cwd}"
+    if cwd and app in TERMINAL_CWD_FLAG and TERMINAL_CWD_FLAG[app] not in cmd:
+        flag = f"{TERMINAL_CWD_FLAG[app]}={shlex.quote(cwd)}"
+        head, sep, tail = cmd.partition(" -- ")
+        cmd = f"{head} {flag}{sep}{tail}"
 
     known = {c["address"] for c in mapped()} | claimed
-    hypr(f'hl.dispatch(hl.dsp.exec_cmd("uwsm app -- {cmd}"))')
+    dispatch("exec_cmd", f"uwsm app -- {cmd}")
 
     win = find_new(known, WINDOW_TIMEOUT)
     if win is None:
@@ -212,8 +298,8 @@ def normalize(title: str) -> str:
 
 
 def move_to(addr: str, workspace) -> None:
-    hypr(f'hl.dispatch(hl.dsp.window.move{{window="address:{addr}", '
-         f"workspace={workspace}}})")
+    dispatch("window.move", window=f"address:{addr}",
+             workspace=workspace_arg(workspace))
     time.sleep(SETTLE)
 
 
@@ -315,7 +401,7 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
     for flag in ("--no-first-run", "--no-default-browser-check"):
         if flag not in cmd:
             cmd = f"{cmd} {flag}"
-    hypr(f'hl.dispatch(hl.dsp.exec_cmd("uwsm app -- {cmd}"))')
+    dispatch("exec_cmd", f"uwsm app -- {cmd}")
 
     # Wait for the browser to reopen what it intends to -- but stop as soon as
     # it settles. A fixed wait burns the whole timeout whenever the browser
@@ -366,7 +452,7 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
     # silently shrink the desktop every time a browser exits uncleanly.
     for target in list(wanted):
         known_now = {c["address"] for c in mapped()} | claimed
-        hypr(f'hl.dispatch(hl.dsp.exec_cmd("uwsm app -- {cmd} --new-window"))')
+        dispatch("exec_cmd", f"uwsm app -- {cmd} --new-window")
         win = find_new(known_now, WINDOW_TIMEOUT)
         if win is None:
             print(f"  ! could not open a replacement window for "
