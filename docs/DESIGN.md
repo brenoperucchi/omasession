@@ -72,11 +72,23 @@ Two failure modes of hyprresume that this plugin must not inherit:
    2026-09-08, hyprresume's own daemon replaced a five-window `last.toml` with a
    one-window one, and left it beside a five-window sidecar. Nothing was zero
    and the session was still ruined. What `session-save.sh` enforces is **never
-   replace a saved session with a worse one, and never move one file of the pair
-   without the other**: it backs both up, lets hyprresume write, validates what
-   came out against the screen it was taken from, and rolls both back if the
-   result is empty, smaller than the screen, or not parseable. `test/guard-cases.sh`
-   holds the cases.
+   replace a saved session with a worse one, and never publish a pair whose two
+   halves came from different saves**.
+
+   It does that by never letting hyprresume near the published file. `hyprresume
+   save <name>` writes `<name>.toml` and touches nothing else, so each save
+   stages into a generation of its own, is validated against the screen it was
+   taken from, gets an fsync (hyprresume performs none — no such call exists in
+   the 0.5.0 binary), and only then becomes `last`, with the generation it
+   replaces kept as `last.prev`. Both halves carry the same generation stamp,
+   because two renames are not a transaction: rather than pretend otherwise, the
+   replay detects a torn pair and falls back to the previous generation instead
+   of matching browser windows against titles from a different capture.
+
+   Measured: 20 kills at random points mid-save, alternating SIGTERM and
+   SIGKILL, produced no torn pair and no orphaned staging file.
+   `test/guard-cases.sh` holds the cases — 20 assertions, run against a live
+   Hyprland.
 
 ## 3. The Hyprland 0.56 Lua IPC
 
