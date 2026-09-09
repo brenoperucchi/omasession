@@ -3,6 +3,7 @@
 #
 #   omasession save [name]        capture the session (guarded)
 #   omasession restore [name]     replay it into the compositor
+#                                 (--if-enabled: só se restoreOnLogin estiver on)
 #   omasession status [--json]    what was captured, when, and what is wrong
 #   omasession resolve [--json]   which command each open window resolves to
 #   omasession install            timer, login restore, browser policy, hyprresume
@@ -114,6 +115,18 @@ cmd_save() {
 
 # ── restore ──────────────────────────────────────────────────────────────────
 cmd_restore() {
+    # --if-enabled é o que a linha do autostart.lua chama. A linha existe
+    # sempre; quem decide é o config. Antes havia DUAS fontes de verdade -- o
+    # `restoreOnLogin` do config e a presença da linha -- e o interruptor do
+    # painel escrevia só a primeira, então desligá-lo não desligava nada. Uma
+    # opção que o programa ignora é o defeito que este projeto acusa nos outros.
+    if [[ "${1:-}" == "--if-enabled" ]]; then
+        shift
+        if [[ "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" == "false" ]]; then
+            say "restore on login is off -- nothing to do"
+            return 0
+        fi
+    fi
     local name="${1:-last}"
     hypr_env || die "no Hyprland instance -- nothing to restore into"
     [[ -f "$SESSION_DIR/$name.toml" ]] || die "no saved session at $SESSION_DIR/$name.toml"
@@ -153,7 +166,15 @@ status_json() {
     local name="${1:-last}"
     local toml="$SESSION_DIR/$name.toml" sidecar="$SESSION_DIR/$name.titles.json"
 
-    local windows; windows="$(toml_windows "$toml")"
+    # O que o RESTORE usaria, não o que está em last.toml. Um par rasgado manda
+    # o replay para a geração anterior, e sem perguntar a ele o painel mostraria
+    # uma sessão enquanto o botão restauraria outra.
+    local effective side_used
+    effective="$(python3 "$LIB/effective.py" "$toml" 2>/dev/null || echo '{}')"
+    side_used="$(jq -r '.sidecar // ""' <<<"$effective")"
+    local fallback; fallback="$(jq -r '.fallback // false' <<<"$effective")"
+    local notes; notes="$(jq -c '.notes // []' <<<"$effective")"
+    local windows; windows="$(jq -r '.windows // 0' <<<"$effective")"
 
     # The captured list carries what the panel needs to group and to be honest:
     # the workspace it belongs to, a name a person recognises, and whether the
@@ -161,8 +182,9 @@ status_json() {
     # a claim we can support -- answered from the .desktop index, which needs no
     # live process, because the saved session describes windows already gone.
     local captured='[]'
-    if [[ -f "$sidecar" ]]; then
-        captured="$(python3 "$LIB/captured.py" "$sidecar" "$toml" 2>/dev/null || echo '[]')"
+    if [[ -n "$side_used" && -f "$side_used" ]]; then
+        local toml_used="${side_used%.titles.json}.toml"
+        captured="$(python3 "$LIB/captured.py" "$side_used" "$toml_used" 2>/dev/null || echo '[]')"
     fi
 
     workspaces="$(jq -c '[.[].ws] | unique | length' <<<"$captured" 2>/dev/null || echo 0)"
@@ -200,6 +222,8 @@ status_json() {
         --arg lastSave "$when" \
         --arg timer "$timer" \
         --arg session "$toml" \
+        --argjson fallback "$fallback" \
+        --argjson notes "$notes" \
         --argjson workspaces "${workspaces:-0}" \
         --argjson intervalSec "$(config_get saveIntervalSec "$DEFAULT_SAVE_INTERVAL")" \
         --argjson restoreOnLogin "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" \
@@ -207,7 +231,7 @@ status_json() {
           refused:$refused, detail:$detail, daemonActive:$daemonActive,
           captured:$captured, lastSave:$lastSave, timer:$timer,
           intervalSec:$intervalSec, restoreOnLogin:$restoreOnLogin,
-          session:$session}'
+          session:$session, usingFallback:$fallback, notes:$notes}'
 }
 
 cmd_status() {
@@ -240,6 +264,8 @@ cmd_status() {
         fi
         say "$windows window(s) captured, $human"
     fi
+    [[ "$(jq -r .usingFallback <<<"$s")" != "true" ]] || \
+        err "the current session is not usable; the restore would use the previous generation"
     [[ "$timer" == active ]] || err "snapshot timer is not running (omasession install)"
     [[ "$refused" == false ]] || err "last save refused -- session preserved: $detail"
     [[ "$daemon" == false ]] || err "hyprresume's daemon is running and writes the same files; it defeats the save guard (omasession install disarms it)"
@@ -306,7 +332,7 @@ UNIT
     say "units written to $UNIT_DIR (every ${interval}s)"
 }
 
-autostart_line() { printf 'o.launch_on_start("%s/bin/omasession restore")' "$SELF"; }
+autostart_line() { printf 'o.launch_on_start("%s/bin/omasession restore --if-enabled")' "$SELF"; }
 
 # Um unico backup, tirado antes da primeira modificacao e nunca sobrescrito.
 # A versao anterior fazia `cp` em dois lugares: o segundo salvava o arquivo JA
@@ -414,7 +440,9 @@ cmd_install() {
         && say "snapshot timer enabled" \
         || err "could not enable the timer (no systemd user session?)"
 
-    [[ "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" == "false" ]] || add_login_restore
+    # A linha entra sempre; ligar e desligar é com o config, que o painel
+    # escreve e que `restore --if-enabled` consulta no login.
+    add_login_restore
 
     if [[ ! -f /etc/chromium/policies/managed/omasession-no-promo.json \
        && ! -f /etc/opt/chrome/policies/managed/omasession-no-promo.json ]]; then
