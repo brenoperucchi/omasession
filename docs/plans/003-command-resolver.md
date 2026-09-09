@@ -1,7 +1,7 @@
 # 003 — O resolvedor de comando: apps arbitrários sem configuração
 
-**Status:** aberto. É o diferencial que sobrou, e ele coincide com o fim da
-nossa única dependência.
+**Status:** resolvedor escrito e medido (`lib/resolve.py`, `omasession resolve`).
+Falta trocar a captura do hyprresume pela nossa — o passo 3 abaixo.
 
 ## Por que agora
 
@@ -63,6 +63,42 @@ cenário que cubra os quatro caminhos acima:
 
 Critério: **classe resolvida para um comando que relança**, verificado
 lançando-o de fato — não inspecionando a string.
+
+### Medido em 2026-09-09
+
+No guest, fechando tudo e relançando **apenas** pelo comando resolvido:
+
+| classe | via | relançou na classe certa |
+|---|---|---|
+| `foot` | `.desktop` + cwd | sim, e o cwd bateu: `~/Devs/my project` |
+| `org.gnome.Nautilus` | `.desktop` | sim |
+| `md.obsidian.Obsidian` | `.desktop` | sim |
+| `chromium` | `.desktop` | sim |
+
+**4/4.** As duas do meio são exatamente as que o `launch_spec` do `omaresume`
+devolveria como `None`.
+
+No host, contra uma sessão real de 19 janelas: 19/19 resolvidas, incluindo
+`qemu` e dois `kitty` com `--class` próprio, ambos por `cmdline` — que é o
+caminho correto ali, porque o `.desktop` traria um `kitty` genérico sem os
+argumentos que definem aquela janela.
+
+**O caminho `cgroup` continua NÃO verificado**: não há Flatpak instalado no
+guest. Não afirmar que funciona até haver.
+
+### A armadilha do cwd, que nenhuma das duas ferramentas trata
+
+Pegar `children[0]` e ler o `cwd` dele — o que o `omaresume` faz — devolve o
+diretório errado com cara de certo. Medido no host: cada janela `kitty` tem PID
+próprio, mas seus filhos são `kitten` e `tmux: client`, **todos** reportando
+`$HOME`, enquanto os shells em que o usuário está vivem dentro do servidor do
+tmux, em outra árvore de processos. Restaurar sete terminais em `$HOME` teria
+parecido sucesso.
+
+`child_cwd()` portanto procura um processo que seja de fato um shell, desce até
+três níveis, e quando só encontra um cliente de multiplexador devolve
+`(None, "cwd lives in the multiplexer server, not in this tree")`. Um
+"não recuperado" honesto vale mais que um diretório errado com confiança.
 
 ## Ordem
 

@@ -4,6 +4,7 @@
 #   omasession save [name]        capture the session (guarded)
 #   omasession restore [name]     replay it into the compositor
 #   omasession status [--json]    what was captured, when, and what is wrong
+#   omasession resolve [--json]   which command each open window resolves to
 #   omasession install            timer, login restore, browser policy, hyprresume
 #   omasession uninstall          undo install
 #
@@ -194,6 +195,27 @@ cmd_status() {
     jq -r '.captured[]? | "  ws\(.ws)  \(.cls)  \(.title)"' <<<"$s"
 }
 
+# ── resolve ──────────────────────────────────────────────────────────────────
+# A resolver that is wrong looks exactly like an application that failed to
+# open. The path taken has to be inspectable before it is trusted, so this is a
+# first-class command and not a debug flag (docs/plans/003).
+cmd_resolve() {
+    hypr_env || die "no Hyprland instance"
+    local json=0
+    [[ "${1:-}" == "--json" ]] && json=1
+
+    local out
+    out="$(hyprctl clients -j | python3 "$LIB/resolve_cli.py")" || die "resolve failed"
+    if (( json )); then printf '%s\n' "$out"; return; fi
+
+    jq -r '.[] | "  \(.via | . + (" " * (10 - length)))  \(.class)"' <<<"$out"
+    local total resolved
+    total="$(jq 'length' <<<"$out")"
+    resolved="$(jq '[.[] | select(.argv != null)] | length' <<<"$out")"
+    say "$resolved/$total resolved"
+    jq -r '.[] | select(.argv == null) | "  ! \(.class): no command found"' <<<"$out"
+}
+
 # ── install ──────────────────────────────────────────────────────────────────
 write_units() {
     mkdir -p "$UNIT_DIR"
@@ -321,6 +343,7 @@ case "${1:-}" in
     save)      shift; cmd_save "$@" ;;
     restore)   shift; cmd_restore "$@" ;;
     status)    shift; cmd_status "$@" ;;
+    resolve)   shift; cmd_resolve "$@" ;;
     install)   shift; cmd_install "$@" ;;
     uninstall) shift; cmd_uninstall "$@" ;;
     -h|--help|help|"") usage ;;
