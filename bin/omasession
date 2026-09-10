@@ -399,17 +399,57 @@ remove_login_restore() {
 LEGACY_SESSION_DIR="$HOME/.local/share/hyprresume/sessions"
 
 migrate_legacy_session() {
-    # Só se o novo diretório ainda não tem nada: nunca sobrescreve uma sessão
-    # que o novo capturador já salvou. Achado da revisão: sem isto, quem
-    # atualiza e reinicia antes do primeiro save novo perde a última sessão
-    # boa que tinha -- o restore de login pode cair nesse intervalo.
-    [[ -f "$SESSION_DIR/last.toml" ]] && return 0
-    [[ -f "$LEGACY_SESSION_DIR/last.toml" ]] || return 0
-    local f
-    for f in last.toml last.titles.json last.prev.toml last.prev.titles.json; do
-        [[ -f "$LEGACY_SESSION_DIR/$f" ]] && cp -p "$LEGACY_SESSION_DIR/$f" "$SESSION_DIR/$f"
+    [[ -d "$LEGACY_SESSION_DIR" ]] || return 0
+    local toml name sidecar tmp_toml tmp_side
+    # Toda sessão nomeada no diretório antigo, não só "last": a CLI sempre
+    # aceitou `save [name]`/`restore [name]`, e a primeira versão desta
+    # migração só olhava "last" -- achado da rodada 5. `*.prev` é pulado aqui
+    # porque não é uma sessão própria, é a geração anterior de uma que já
+    # está no laço; copiada junto, mais abaixo.
+    for toml in "$LEGACY_SESSION_DIR"/*.toml; do
+        [[ -e "$toml" ]] || continue
+        name="$(basename "$toml" .toml)"
+        case "$name" in omasession.*|*.prev) continue ;; esac
+        # Nunca sobrescreve uma sessão que o novo capturador já salvou, seja
+        # "last" ou um nome próprio -- achado da rodada 4: sem isto, quem
+        # atualiza e reinicia antes do primeiro save novo perde a última
+        # sessão boa que tinha.
+        [[ -f "$SESSION_DIR/$name.toml" ]] && continue
+        sidecar="$LEGACY_SESSION_DIR/$name.titles.json"
+        [[ -f "$sidecar" ]] || continue
+
+        # O mesmo lock que save/restore respeitam para este nome: achado da
+        # rodada 5, sem isto uma migração correndo ao lado de um save do
+        # MESMO nome (raro, mas possível logo depois de um install cujo timer
+        # já dispara) publica um por cima do outro sem se ver.
+        exec 9>"$SESSION_DIR/.$name.lock"
+        if ! flock -n 9; then
+            err "skipping migration of '$name' -- a save is running"
+            exec 9>&-
+            continue
+        fi
+
+        # Encena com nomes temporários e só troca pro nome final por rename:
+        # achado da rodada 5, copiar direto pro nome final e ser interrompido
+        # no meio deixa um par pela metade (toml sem sidecar, ou vice-versa)
+        # que a checagem acima veria como "já existe" e nunca completaria
+        # numa tentativa seguinte.
+        tmp_toml="$(mktemp "$SESSION_DIR/.migrate.$name.XXXXXX")"
+        tmp_side="$(mktemp "$SESSION_DIR/.migrate.$name.XXXXXX")"
+        if cp -p "$toml" "$tmp_toml" 2>/dev/null && cp -p "$sidecar" "$tmp_side" 2>/dev/null; then
+            mv -f "$tmp_toml" "$SESSION_DIR/$name.toml"
+            mv -f "$tmp_side" "$SESSION_DIR/$name.titles.json"
+            if [[ -f "$LEGACY_SESSION_DIR/$name.prev.toml" && -f "$LEGACY_SESSION_DIR/$name.prev.titles.json" ]]; then
+                cp -p "$LEGACY_SESSION_DIR/$name.prev.toml" "$SESSION_DIR/$name.prev.toml" 2>/dev/null || true
+                cp -p "$LEGACY_SESSION_DIR/$name.prev.titles.json" "$SESSION_DIR/$name.prev.titles.json" 2>/dev/null || true
+            fi
+            say "migrated '$name' from $LEGACY_SESSION_DIR (left untouched there)"
+        else
+            err "could not migrate '$name' from $LEGACY_SESSION_DIR -- copy failed"
+            rm -f "$tmp_toml" "$tmp_side"
+        fi
+        exec 9>&-
     done
-    say "migrated last saved session from $LEGACY_SESSION_DIR (hyprresume's old directory, left untouched there)"
 }
 
 cmd_install() {
@@ -445,6 +485,13 @@ cmd_install() {
     if [[ ! -f /etc/chromium/policies/managed/omasession-no-promo.json \
        && ! -f /etc/opt/chrome/policies/managed/omasession-no-promo.json ]]; then
         err "browser policy not installed -- run: sudo $SELF/bin/browser-setup"
+    fi
+    # Silencioso até a rodada 5: quem atualizou de uma versão que desarmava o
+    # hyprresume ficava com a linha comentada enquanto o OmaSession estivesse
+    # instalado, sem nenhuma indicação de que essa alteração ainda existe ou
+    # de que este install já não a faz mais.
+    if [[ -f "$AUTOSTART" ]] && grep -qF -- "$LEGACY_MARK_DISARM" "$AUTOSTART"; then
+        say "note: hyprresume is still disarmed in autostart.lua from an older install -- this version no longer does that, but won't undo it either; 'omasession uninstall' will"
     fi
     say "installed"
 }

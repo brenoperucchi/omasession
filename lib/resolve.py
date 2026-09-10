@@ -425,21 +425,28 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
     # com --app-id/--class custom (o próprio caso que motivou este projeto:
     # `foot --app-id=TUI.tile herdr`) tem klass="TUI.tile", que não bate com
     # nenhuma das duas tabelas abaixo mesmo sendo, de fato, um foot. Medido na
-    # revisão desta rodada: sem checar também o binário já resolvido, esse
-    # caso pula o bloco inteiro -- cwd e tmux ficam sem tentar, exatamente a
-    # janela que este mecanismo existe para cobrir.
-    resolved_bin = Path(result["argv"][0]).name if result["argv"] else None
-    wants_cwd_flag = klass in TERMINAL_CWD_FLAG
+    # revisão da rodada 4: sem checar também o binário já resolvido, esse caso
+    # pula o bloco inteiro -- cwd e tmux ficam sem tentar, exatamente a janela
+    # que este mecanismo existe para cobrir. `env FOO=1 kitty` no Exec= de um
+    # .desktop mantém "env" como primeiro token de propósito (exec_argv não
+    # mexe nisso); pular tokens com "=" e sem "-" na frente acha o binário de
+    # verdade nesse caso também (achado da rodada 5).
+    resolved_bin = None
+    for a in result["argv"] or ():
+        if "=" in a and not a.startswith("-"):
+            continue
+        resolved_bin = Path(a).name
+        break
+    cwd_flag = TERMINAL_CWD_FLAG.get(klass) or TERMINAL_CWD_FLAG.get(resolved_bin)
     wants_tmux = klass in TRAILING_ARGV_TERMINALS or resolved_bin in TRAILING_ARGV_TERMINALS
 
-    if (wants_cwd_flag or wants_tmux) and pid:
+    if (cwd_flag or wants_tmux) and pid:
         cwd, why = child_cwd(pid)
         result["cwd_note"] = why
-        if cwd and wants_cwd_flag:
+        if cwd and cwd_flag:
             result["cwd"] = cwd
-            flag = TERMINAL_CWD_FLAG[klass]
-            if result["argv"] and not any(a.startswith(flag) for a in result["argv"]):
-                result["argv"] = result["argv"] + [f"{flag}={cwd}"]
+            if result["argv"] and not any(a.startswith(cwd_flag) for a in result["argv"]):
+                result["argv"] = result["argv"] + [f"{cwd_flag}={cwd}"]
         elif not cwd and wants_tmux:
             # child_cwd() found no shell of its own -- the usual reason is a
             # tmux client sitting where the shell should be. Reattaching to
@@ -448,17 +455,32 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
             # shell in $HOME, and tmux answers its own pane's cwd from there.
             session, session_path, tmux_why = tmux_session(pid)
             result["tmux_note"] = tmux_why
-            # Só acrescenta se o argv resolvido ainda não tiver um comando
-            # filho próprio (um `--` já presente, vindo de um .desktop
-            # customizado ou do fallback de cmdline): sem isto, um
-            # `foot -- tmux attach -t work` vira
-            # `foot -- tmux attach -t work -- tmux new -A -s work` --
-            # o comando filho continua sendo o `tmux attach` antigo, os
-            # argumentos novos vão pra ELE, não pro terminal. Achado da
-            # revisão desta rodada.
-            if session and result["argv"] and "--" not in result["argv"]:
+            if session and result["argv"]:
+                argv = result["argv"]
+                # Não "tem --", "o comando filho já é tmux": achado da rodada
+                # 5, dos dois revisores, em direções opostas da mesma regra
+                # errada. Um cmdline preservado de uma janela que JÁ roda tmux
+                # (sabemos que roda -- é assim que tmux_session() achou o
+                # cliente) às vezes tem `-- tmux ...` e às vezes não (foot
+                # aceita `foot --app-id=X cmd` sem separador -- é como o
+                # Herdr, o próprio caso motivador, se lança). "só age se não
+                # tiver --" deixava passar o segundo formato sem tocar
+                # (duplicava tmux); "só troca o que vier depois de --" perdia
+                # o -A quando o formato já usava -- (uma sessão criada sem -A,
+                # ou um `tmux attach` que falha se a sessão ainda não existe,
+                # ficam órfãos do mesmo jeito depois do reboot). A pergunta
+                # certa é onde está o "tmux" de verdade no argv, com ou sem
+                # separador, e substituir dali pra frente -- nunca acrescentar
+                # em cima de um comando que já é outra coisa (`-- btop`,
+                # `-- herdr`): esses não têm cliente tmux embaixo, então
+                # tmux_session() já teria devolvido None antes de chegar aqui.
+                tmux_idx = next((i for i, a in enumerate(argv)
+                                  if i > 0 and Path(a).name == "tmux"), None)
+                if tmux_idx is not None:
+                    result["argv"] = argv[:tmux_idx] + ["tmux", "new", "-A", "-s", session]
+                else:
+                    result["argv"] = argv + ["--", "tmux", "new", "-A", "-s", session]
                 result["tmux_session"] = session
-                result["argv"] = result["argv"] + ["--", "tmux", "new", "-A", "-s", session]
                 if session_path:
                     # A cwd para o painel e uma queda-de-pau se o reattach em
                     # si falhar -- replay.py já sabe inserir isto antes de um

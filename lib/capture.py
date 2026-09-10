@@ -115,7 +115,15 @@ if __name__ == "__main__":
     # of the one it was built to protect. Found in review, round 4: nothing
     # broke visibly, the invariant the comment above the guard already
     # describes just stopped being true the moment the reader became us
-    # instead of hyprresume. A tty means nobody piped anything in -- standalone
-    # manual runs (`python3 capture.py name`) still work, reading it fresh.
-    piped_clients = None if sys.stdin.isatty() else json.load(sys.stdin)
+    # instead of hyprresume.
+    #
+    # `isatty()` alone is not "nobody piped anything in": found in review,
+    # round 5 -- a systemd unit, cron, or any `subprocess` call that does not
+    # set `stdin=` gets /dev/null, which is not a tty either, and reading it
+    # as JSON crashed with a traceback instead of falling back to fetching
+    # fresh. Reading whatever is actually there and only trusting it if it
+    # parses covers both the piped case and the closed/empty one; standalone
+    # manual runs (`python3 capture.py name`) still fetch fresh either way.
+    piped = sys.stdin.read().strip() if not sys.stdin.isatty() else ""
+    piped_clients = json.loads(piped) if piped else None
     sys.stdout.write(capture(name, clients=piped_clients))

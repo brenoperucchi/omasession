@@ -195,24 +195,19 @@ fi
 rm -f "$capture_err"
 mv -f "$STAGING_TOML.raw" "$STAGING_TOML"
 
-# Não a contagem de [[window]] crua: uma janela cujo resolvedor devolveu
-# argv=None ainda vira um registro (app_id/workspace/geometria, sem
-# launch_cmd) -- válido para o parser, inútil para o replay, que pula esse
-# registro no restore (replay.py: "no launch_cmd, skipped"). Achado da
-# revisão: contando o registro mesmo assim, o piso e a cobertura viam uma
-# tela cheia como coberta quando na verdade uma janela não tinha comando
-# nenhum pra voltar -- o guard existe exatamente pra recusar isto, e a
-# contagem crua o deixava cego pra esse caso específico.
-toml_resolved_windows() {
-    [[ -f "$1" ]] || { echo 0; return; }
-    python3 - "$1" <<'PY' 2>/dev/null || echo -1
-import sys, tomllib
-with open(sys.argv[1], "rb") as fh:
-    print(sum(1 for w in tomllib.load(fh).get("window", []) if w.get("launch_cmd")))
-PY
-}
-
-count_new="$(toml_resolved_windows "$STAGING_TOML")"
+# Cru, de propósito -- não é a mesma pergunta que "quantas janelas têm
+# launch_cmd". A primeira versão desta correção contava só as com comando, e a
+# rodada 5 achou o furo do outro lado: uma janela cujo resolvedor não dá conta
+# (uma classe sem .desktop, sem cgroup, com /proc ilegível -- um app rodando
+# como outro usuário) é uma condição ESTÁVEL, a mesma janela recusando a cada
+# tick, não uma escrita parcial transitória que o próximo tick resolve. Contar
+# só resolvidas faz o guard tratar as duas a mesma coisa, e a sessão inteira
+# fica sem salvar enquanto aquela janela existir -- pior que perder só ela.
+# Cobertura crua continua pegando o caso que ela existe para pegar (escrita
+# parcial de verdade); o "sem comando" já chega ao painel por outro caminho:
+# captured.py lê `launch_cmd` do MESMO toml publicado e marca a janela como
+# não resolvível, sem depender de o guard ter recusado nada.
+count_new="$(toml_windows "$STAGING_TOML")"
 
 # As duas regras. Cobrem acidentes diferentes e nenhuma implica a outra.
 #

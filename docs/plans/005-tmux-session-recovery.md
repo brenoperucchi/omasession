@@ -78,12 +78,15 @@ Em `lib/resolve.py`:
   intactos). Alacritty/ghostty/wezterm ficam de fora não por serem
   diferentes, por nunca terem sido usados por este projeto -- e este projeto
   já criticou o suficiente ferramentas que afirmam o que não mediram.
-- Quando os dois batem (terminal conhecido + sessão tmux achada), o `argv`
-  vira `[..., "--", "tmux", "new", "-A", "-s", "<nome>"]`, e o `cwd` (o
-  `session_path` do tmux, de brinde) vai para o mesmo campo que o `cwd_note`
-  ocuparia -- `replay.py` já sabia inserir esse flag antes do `--` (comentário
-  próprio, "hyprresume records terminals as `foot -- btop`"), então nenhuma
-  mudança foi necessária lá.
+- Quando os dois batem (terminal conhecido + sessão tmux achada): se o argv
+  resolvido já tem um `tmux` de verdade (via `cmdline`, com ou sem `--`
+  antes -- ver rodada 5), a cauda a partir dali é SUBSTITUÍDA por
+  `["tmux", "new", "-A", "-s", "<nome>"]`; se não tem nenhum (o caso
+  `.desktop`, `foot`/`kitty` puro), é ACRESCENTADO `["--", "tmux", "new",
+  "-A", "-s", "<nome>"]`. O `cwd` (o `pane_current_path` do tmux, de brinde)
+  vai para o mesmo campo que o `cwd_note` ocuparia -- `replay.py` já sabia
+  inserir esse flag antes do `--` (comentário próprio, "hyprresume records
+  terminals as `foot -- btop`"), então nenhuma mudança foi necessária lá.
 
 ## Rodada de revisão (omasession-4) — três achados de verdade, corrigidos
 
@@ -113,22 +116,89 @@ dois lados, e com razão:
   acrescentado mesmo quando o `argv` resolvido já tinha um `--` seu (um
   `.desktop` customizado, ou o próprio `cmdline` preservando um `tmux attach`
   real) -- o resultado tinha DOIS `tmux` na mesma linha, e o segundo nunca
-  roda. Corrigido: só acrescenta se `"--" not in result["argv"]`. Consequência
-  aceita, não um bug: quando o `cmdline` já é fiel a um `tmux attach`/`new`
-  real, ele é preservado como está, sem `-A` de brinde -- mesma política que
-  o resto do resolvedor já tem para essa fonte ("last resort; may not carry
-  the app's own state" é sobre isto).
+  roda. **A correção desta rodada (`"--" not in argv`) estava ela mesma
+  errada -- ver rodada 5 abaixo, que a substitui.**
 
 Achados menores, também corrigidos na mesma rodada, fora deste mecanismo mas
 no mesmo diff: `capture.py` fazia sua PRÓPRIA leitura de `hyprctl clients`
 em vez de receber a que `session-save.sh` já tinha lido (quebrava a
 invariante "ler a tela uma vez" que o guard depende); o guard contava
 `[[window]]` cru em vez de janelas com `launch_cmd` de verdade (uma falha de
-resolução silenciosa passava pelo piso e pela cobertura); `bin/omasession`
-não migrava sessões do diretório antigo do hyprresume nem desfazia, no
-uninstall, o marcador de uma versão anterior que desarmava o autostart dele;
-`capture.py` não escapava o nome da sessão pelo serializador TOML. Todos
-medidos e corrigidos; ver o diff de `omasession-4` em `.herdr/review/`.
+resolução silenciosa passava pelo piso e pela cobertura -- **essa correção
+também foi refeita na rodada 5**); `bin/omasession` não migrava sessões do
+diretório antigo do hyprresume nem desfazia, no uninstall, o marcador de uma
+versão anterior que desarmava o autostart dele; `capture.py` não escapava o
+nome da sessão pelo serializador TOML. Ver o diff de `omasession-4` em
+`.herdr/review/`.
+
+## Segunda rodada (omasession-5) — a correção da rodada 4 tinha um furo novo
+
+Rodada seguinte, sobre o commit que corrigiu a rodada 4. Também não foi
+APPROVE: a regra `"--" not in argv` da correção anterior **anulava a própria
+correção da classe custom** exatamente no caso mais comum.
+
+- **P1 (um revisor) / P2 (o outro), a mesma regressão vista de dois lados:**
+  uma classe custom resolve por `cmdline`, e o `cmdline` de uma janela que
+  já roda tmux **sempre** contém o `tmux` de verdade -- às vezes com `--`
+  antes (`foot -- tmux new`), às vezes sem (`foot --app-id=X tmux attach -t
+  work`, o mesmo formato do `foot --app-id=TUI.tile herdr` que motivou o
+  projeto). A regra "só age se não tiver `--`" deixava passar o segundo
+  formato sem tocar (duplicava `tmux` -- achado de um revisor, medido em
+  memória) e o primeiro formato ficava intocado mesmo faltando o `-A` que
+  torna `tmux new`/`tmux attach` seguro contra sessão ainda não existir
+  (achado do outro revisor, medido numa kitty real deste host: o comando
+  final era `kitty ... -- tmux new`, sem `-A -s`, e depois de um reboot isso
+  cria uma sessão nova sem nome enquanto a de verdade fica órfã -- o mesmo
+  resultado que a correção inteira existe para evitar). A pergunta certa não
+  é "tem `--`", é "o comando filho já é tmux": localizar o token cujo
+  `basename` é `tmux` (a partir do índice 1, nunca o próprio terminal) e
+  **substituir a cauda a partir dali** por `tmux new -A -s <nome>`, com ou
+  sem `--` antes. Quando não há nenhum `tmux` no argv (o caso `.desktop`,
+  bare `foot`), o comportamento continua sendo acrescentar. Um comando filho
+  genuinamente diferente (`-- btop`, `-- herdr`) nunca chega a essa decisão:
+  `tmux_session()` só devolve uma sessão quando há um cliente tmux de
+  verdade na árvore, e esses casos não têm.
+- **P3 (um revisor):** o gate de `cwd` (diferente do gate de `tmux`, que já
+  tinha ganhado o binário resolvido na rodada 4) continuava só por `klass` --
+  uma classe custom com um shell de verdade por baixo (sem tmux) entrava no
+  bloco mas tinha o diretório descartado. Corrigido com o mesmo fallback:
+  `TERMINAL_CWD_FLAG.get(klass) or TERMINAL_CWD_FLAG.get(resolved_bin)`.
+  Achado à parte, mesmo revisor: `Path(argv[0]).name` dava `env` para um
+  `Exec=env FOO=1 kitty`; corrigido pulando tokens com `=` sem `-` na frente
+  ao escolher o binário resolvido.
+- **P2 (o outro revisor):** a correção da rodada 4 pro guard (contar só
+  janelas com `launch_cmd`) trocou um problema por outro -- uma janela cujo
+  resolvedor nunca dá conta (classe sem `.desktop`, sem cgroup, `/proc`
+  ilegível) é uma condição ESTÁVEL, não uma escrita parcial transitória, e
+  contá-la como "falha de captura" fazia a sessão inteira parar de salvar
+  enquanto aquela janela existisse -- pior que perder só ela. Revertido para
+  contagem crua no guard; o "sem comando" já chega ao painel por outro
+  caminho que já existia (`captured.py` lê `launch_cmd` do mesmo toml
+  publicado e marca a janela como não resolvível), sem precisar o guard
+  bloquear nada.
+- **P3 (o outro revisor):** `capture.py` tratava "não é tty" como sinônimo de
+  "alguém encanou dados", mas `/dev/null` (systemd, cron, `subprocess` sem
+  `stdin=`) também não é tty -- `json.load` num stdin vazio quebrava com
+  traceback. Corrigido lendo o texto primeiro e só decodificando se não
+  vier vazio.
+- **P2 (um revisor), fora deste mecanismo:** a migração do diretório antigo
+  só cobria `last`/`last.prev`, mas a CLI sempre aceitou `save`/`restore` com
+  nome -- uma sessão nomeada de uma instalação anterior ficava presa lá.
+  Generalizada para varrer todo `*.toml` do diretório legado. Achado à
+  parte, mesmo revisor: a cópia não tinha lock nem era atômica -- uma
+  interrupção no meio (ou uma corrida com um save do mesmo nome) podia
+  deixar um par pela metade que a checagem de "já existe" nunca completaria
+  depois. Corrigida com o mesmo lock por nome que save/restore respeitam, e
+  staging em arquivo temporário antes do rename para o nome final.
+
+Medido depois de cada correção: as três `check`s de `test/tmux-cases.sh`
+continuaram 6/6; `test/guard-cases.sh` 25/25; o caso que os dois revisores
+pediram explicitamente (`foot --app-id=X -- tmux attach -t <sessão>`, classe
+custom com cmdline já apontando pro tmux) testado à mão no lab -- o comando
+final agora é `foot --app-id=X -- tmux new -A -s <sessão>`, com `cwd` do
+painel ativo em vez de "not recoverable"; a migração generalizada testada
+com um snapshot nomeado criado só no diretório legado. Ver o diff de
+`omasession-5` em `.herdr/review/`.
 
 ## O que continua sendo do usuário, não deste plugin
 
