@@ -22,7 +22,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # tambem precisa ser restaurado desde que o default virou false (o painel le o
 # CLI de verdade agora) -- sem forcar mockMode=true aqui, este script deixaria
 # de renderizar o mock fixo e passaria a depender do que estiver salvo de
-# verdade no guest no momento da captura.
+# verdade no guest no momento da captura. A restauracao tambem reenvia o
+# arquivo pro GUEST, nao so pro repo local -- achado medido: sem isso o
+# guest ficava preso no mock da ultima captura, com os botoes do painel
+# desabilitados, indefinidamente, ate alguem notar e reinstalar na mao.
 ORIG_SCEN=$(sed -n 's/.*property string scenario: "\([a-z]*\)".*/\1/p' Panel.qml | head -1)
 ORIG_MOCK=$(sed -n 's/.*property bool mockMode: \(true\|false\).*/\1/p' Panel.qml | head -1)
 set_panel() {
@@ -36,6 +39,17 @@ PY
 }
 restore_panel() {
   [ -n "$ORIG_SCEN" ] && [ -n "$ORIG_MOCK" ] && set_panel "$ORIG_SCEN" "$ORIG_MOCK"
+  # Sem isto o guest ficava preso no cenario fixo da ultima captura pra
+  # sempre: restaurava o arquivo local (o repo), nunca reenviava a versao de
+  # producao de volta pro guest. Medido: o painel real la parou de refletir
+  # save/restore de verdade -- ficava sempre mostrando o mesmo mock, com os
+  # botoes desabilitados (mockMode desliga Save now/Restore session), e
+  # ninguem via aviso nenhum disso.
+  scp -q -P 2223 -i "$L/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$L/known_hosts" \
+    Panel.qml omatest@127.0.0.1:.config/omarchy/plugins/brenoperucchi.omasession/Panel.qml \
+    2>/dev/null || echo "shoot.sh: aviso -- nao consegui devolver o Panel.qml de producao pro guest" >&2
+  ssh_ 'export XDG_RUNTIME_DIR=/run/user/1000; pkill -x quickshell' >/dev/null 2>&1 || true
 }
 trap restore_panel EXIT
 

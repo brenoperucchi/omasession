@@ -180,9 +180,16 @@ Panel {
       var name = order[k]
       var wss = Object.keys(mons[name]).sort(function(a, b) { return a - b })
       var groups = []
-      for (var j = 0; j < wss.length; j++)
+      var flat = []
+      for (var j = 0; j < wss.length; j++) {
         groups.push({ ws: parseInt(wss[j]), items: mons[name][wss[j]] })
-      out.push({ mon: name, workspaces: groups })
+        // Achatado pra grade de cards: cada item já carrega seu próprio `ws`
+        // (veio de `captured`), então a grade não perde a informação de
+        // workspace mesmo sem o cabeçalho "WORKSPACE N" por cima do grupo.
+        for (var x = 0; x < mons[name][wss[j]].length; x++)
+          flat.push(mons[name][wss[j]][x])
+      }
+      out.push({ mon: name, workspaces: groups, flatItems: flat })
     }
     return out
   }
@@ -213,10 +220,14 @@ Panel {
   readonly property string agoText: {
     if (!status) return "never"
     var s = status.agoSec
-    // PanelHero renderiza o meta em maiusculas, e "42s ago" vira "42S AGO":
-    // a unidade colada no numero fica ilegivel. Abaixo de um minuto o numero
-    // exato nao informa nada de util de qualquer forma.
-    if (s < 60) return "just now"
+    // Segundos exatos abaixo de um minuto: antes virava "just now" porque
+    // isto ficava dentro do `meta` do PanelHero, que maiusculiza sozinho e
+    // fazia "42s ago" virar "42S AGO" -- ilegível com a unidade colada no
+    // número. Não mora mais lá (virou parte da linha de fatos, texto normal,
+    // maiúscula/minúscula como escrito), e a razão de existir deste campo é
+    // justamente notar quando o snapshot está envelhecendo -- "just now"
+    // escondia isso pro primeiro minuto inteiro.
+    if (s < 60) return s + "s ago"
     if (s < 3600) return Math.floor(s / 60) + " min ago"
     return Math.floor(s / 3600) + " h ago"
   }
@@ -268,7 +279,17 @@ Panel {
             anchors.right: loginToggle.left
             anchors.rightMargin: Style.space(8)
             title: "OmaSession"
-            meta: "pick up where you left off"
+            // O `meta` do PanelHero é onde os painéis nativos do Omarchy põem
+            // estado, não slogan -- o tailscale escreve "Tailscale is
+            // disconnected" ali. "pick up where you left off" era tagline, e
+            // palavra por palavra a mesma do OmaResume. Este slot passa a
+            // responder a pergunta que o interruptor ao lado levanta e que
+            // antes só tinha resposta no hover -- PanelHero já deixa em
+            // caixa alta sozinho, por isso o texto aqui fica em minúsculas.
+            meta: root.cliMissing     ? "cli not installed"
+                : !root.status        ? "nothing saved yet"
+                : root.restoreOnLogin ? "restores on next login"
+                                      : "restore on login is off"
             foreground: root.fg
             iconComponent: Component {
               Item {
@@ -379,26 +400,6 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.spacing.md
 
-            Item {
-              width: parent.width
-              height: savedLabel.implicitHeight
-              Text {
-                id: savedLabel
-                anchors.left: parent.left
-                text: "SAVED SESSION"
-                color: Qt.darker(root.fg, 1.35)
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-              }
-              Text {
-                anchors.right: parent.right
-                text: root.agoText
-                color: root.dim
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-              }
-            }
-
             // A pergunta que importa segundos antes de reiniciar não é
             // "o que eu tenho aberto" -- isso está na tela. É "o que volta".
             // Um inventário responde a primeira; este número responde a
@@ -414,12 +415,50 @@ Panel {
               font.pixelSize: Style.font.subtitle
             }
 
+            // ── a régua do que volta ─────────────────────────────────────
+            // Um segmento por janela capturada: aceso = tem comando para
+            // reabrir, apagado = não tem. É a frase acima em forma de
+            // desenho, e é a marca que o OmaResume não copia sem antes ter
+            // um resolvedor -- a régua dele seria sempre cheia, porque todo
+            // item dele diz "Ready". Sem campo novo: `resolvable` já está
+            // no contrato.
+            Item {
+              id: ruler
+              width: parent.width
+              height: Style.space(4)
+              visible: root.captured.length > 0
+
+              // A largura vem do pai (savedCol, que tem largura por
+              // anchors), nunca da soma dos filhos: um Row dimensionado
+              // pelos filhos que se dimensionam pelo Row é o laço de
+              // binding clássico, a mesma família da armadilha de
+              // implicitWidth do PANEL.md.
+              readonly property real gap: Style.spacing.sm
+              readonly property real seg:
+                Math.max(1, (width - gap * Math.max(0, root.captured.length - 1))
+                            / Math.max(1, root.captured.length))
+
+              Repeater {
+                model: root.captured
+                Rectangle {
+                  x: index * (ruler.seg + ruler.gap)
+                  width: ruler.seg
+                  height: ruler.height
+                  radius: height / 2
+                  color: modelData.resolvable
+                         ? Color.accent
+                         : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.18)
+                }
+              }
+            }
+
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
               text: root.workspaceCount
                     + (root.workspaceCount === 1 ? " workspace" : " workspaces")
                     + (root.multiMonitor ? ", " + root.byMonitor.length + " monitors" : "")
+                    + (root.status ? " · saved " + root.agoText : "")
               color: root.dim
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
@@ -471,7 +510,12 @@ Panel {
 
         PanelSeparator { width: parent.width; visible: root.mockMode || !root.cliMissing }
 
-        // ── as janelas: monitor -> workspace -> apps ─────────────────────
+        // ── as janelas: monitor -> grade de cards ─────────────────────────
+        // Uma linha por app, cheia de largura, é a mesma silhueta do
+        // OmaResume (um item = uma linha). Uma grade de 2 colunas por
+        // monitor é mais densa e não precisa do cabeçalho "WORKSPACE N"
+        // repetido pra cada grupo -- o número de workspace vira um detalhe
+        // discreto dentro do próprio card, não uma linha inteira por grupo.
         Repeater {
           model: (root.mockMode || !root.cliMissing) ? root.byMonitor : []
 
@@ -489,65 +533,57 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
-            Repeater {
-              model: modelData.workspaces
+            Grid {
+              id: appGrid
+              width: parent.width
+              columns: 2
+              columnSpacing: Style.spacing.sm
+              rowSpacing: Style.spacing.sm
 
-              Column {
-                width: column.width
-                spacing: Style.spacing.sm
+              Repeater {
+                model: modelData.flatItems
 
-                PanelSectionHeader {
-                  width: parent.width
-                  text: "WORKSPACE " + modelData.ws
-                }
+                Rectangle {
+                  width: (appGrid.width - appGrid.columnSpacing) / 2
+                  height: tileCol.implicitHeight + Style.space(14)
+                  radius: Style.space(3)
+                  color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
 
-                Repeater {
-                  model: modelData.items
+                  Column {
+                    id: tileCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.margins: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.spacing.xxs
 
-                  Rectangle {
-                    width: parent.width
-                    height: itemCol.implicitHeight + Style.space(10)
-                    radius: Style.space(3)
-                    color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
-
-                    Column {
-                      id: itemCol
-                      anchors.left: parent.left
-                      anchors.right: statusText.left
-                      anchors.margins: Style.space(7)
-                      anchors.rightMargin: Style.space(8)
-                      anchors.verticalCenter: parent.verticalCenter
-                      spacing: Style.spacing.xxs
-
-                      Text {
-                        text: modelData.app
-                        color: root.fg
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                      }
-                      // O que esta linha vai RECUPERAR. Para um terminal é o
-                      // diretório -- e quando não dá para recuperá-lo, dizer
-                      // isso vale mais que repetir o título da janela, que
-                      // ninguém vai reconhecer depois do reboot de qualquer
-                      // forma.
-                      Text {
-                        width: parent.width
-                        elide: Text.ElideRight
-                        text: modelData.detail || modelData.title
-                        color: root.dim
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.caption
-                      }
-                    }
-
-                    // Silêncio significa "vai voltar". Só a exceção fala: um
-                    // rótulo repetido em toda linha é ruído, e ruído esconde
-                    // exatamente o caso que precisa ser visto antes do reboot.
                     Text {
-                      id: statusText
-                      anchors.right: parent.right
-                      anchors.rightMargin: Style.space(7)
-                      anchors.verticalCenter: parent.verticalCenter
+                      width: parent.width
+                      elide: Text.ElideRight
+                      text: modelData.app
+                      color: root.fg
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                    }
+                    // O que este card vai RECUPERAR. Para um terminal é o
+                    // diretório -- e quando não dá para recuperá-lo, dizer
+                    // isso vale mais que repetir o título da janela, que
+                    // ninguém vai reconhecer depois do reboot de qualquer
+                    // forma. "ws N" na frente porque o card sozinho, sem o
+                    // cabeçalho de grupo que existia antes, não diz mais em
+                    // que workspace a janela volta.
+                    Text {
+                      width: parent.width
+                      elide: Text.ElideRight
+                      text: "ws" + modelData.ws + " · " + (modelData.detail || modelData.title)
+                      color: root.dim
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+                    // Silêncio significa "vai voltar". Só a exceção fala.
+                    Text {
+                      width: parent.width
+                      elide: Text.ElideRight
                       visible: text !== ""
                       text: !modelData.resolvable ? "no command"
                             : (modelData.warn || "")
