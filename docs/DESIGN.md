@@ -39,56 +39,76 @@ Measured on a 6-window session:
 
 The gap is not quality — it is a compositor API that moved.
 
-## 2. Boundary: what we take from hyprresume, what we replace
+## 2. Hyprresume: out of the execution path since 2026-09-10
 
-hyprresume's **save** is good and hard to rebuild: it resolves a window to a
-command through `.desktop` index, Flatpak cgroup and `/proc`, and it walks down
-the process tree to find a terminal's real cwd (`pid 10496 → child shell 10499
-→ cwd ~/Devs/project-a`). Its **restore** is dead on this compositor.
+This section used to describe a boundary: hyprresume's **save** was kept
+because it resolved a window to a command and walked a terminal's process tree
+for its real cwd, and only its **restore** was replaced (§1). That boundary is
+now crossed — `lib/capture.py` (a `hyprctl`-based capture) and `lib/resolve.py`
+(§ below, measured in `docs/plans/003-command-resolver.md`) do the whole job,
+and hyprresume is not invoked, checked for, or disarmed anywhere in this
+plugin. `bin/omasession install` no longer requires it, and there is nothing
+left in `cmd_install`/`cmd_uninstall` that knows it exists.
 
 ```
-observe + resolve command + cwd   →  hyprresume save        (kept)
-session format (last.toml)        →  hyprresume            (kept, extended)
-window titles                     →  our sidecar           (added — see §4)
-replay into the compositor        →  ours                  (replaced)
-browser content                   →  the browser itself    (orchestrated, §5)
-panel / autostart / timers        →  ours                  (added)
+observe + resolve command + cwd   →  lib/capture.py + lib/resolve.py  (ours)
+session format (last.toml)        →  ours, same shape hyprresume wrote
+window titles                     →  our sidecar          (§4)
+replay into the compositor        →  ours                 (replaced in §1)
+browser content                   →  the browser itself   (orchestrated, §5)
+panel / autostart / timers        →  ours
 ```
 
-Keep the boundary cheap to cross: hyprresume has been unmaintained since March
-2026 and we use only two things from it. If it has to go, the work is the
-command resolver, not the whole plugin.
+Why it had to go, not just be worked around: hyprresume resolves a window with
+no `.desktop` entry — a custom `--class`/`--app-id` set by the launcher itself
+— through `/proc/<pid>/exe`, the binary, discarding every command-line
+argument. Measured on a real case, not a synthetic one: the Herdr
+terminal-workspace-manager runs its TUI as `foot --app-id=TUI.tile herdr`, and
 
-Two failure modes of hyprresume that this plugin must not inherit:
+    $ hyprresume resolve TUI.tile
+    TUI.tile → foot
+
+so after a reboot the window came back as an empty terminal, herdr never
+started. `omasession resolve` — `lib/resolve.py`, reading `/proc/<pid>/cmdline`
+— already resolved this same window correctly before this change; the gap was
+that `last.toml` came from `hyprresume save`, not from that resolver.
+`lib/capture.py` is what puts the resolver on the path the replay actually
+reads. Confirmed on 2026-09-10 with a real reboot in the lab: the window now
+comes back running herdr, not a bare `foot`, and without the duplication that
+appeared alongside the wrong command.
+
+Two failure modes of hyprresume that this plugin does not inherit — kept for
+the record, since the second still shapes `session-save.sh` today:
 
 1. **It reports success it never verified** — `6/6 apps (0 failed)` against an
    empty desktop. Count `hyprctl clients` after the pass and report that.
 2. **A failed restore destroys the saved session.** With `restore_on_start` and
-   a 120s autosave, the daemon starts, restores nothing, and two minutes later
-   writes the empty desktop over a good `last.toml`. A real 6-window session
-   was lost this way during testing.
+   a 120s autosave, hyprresume's daemon starts, restores nothing, and two
+   minutes later writes the empty desktop over a good `last.toml`. A real
+   6-window session was lost this way during testing.
 
-   The invariant this forces is not "never save an empty desktop" — measured on
-   2026-09-08, hyprresume's own daemon replaced a five-window `last.toml` with a
-   one-window one, and left it beside a five-window sidecar. Nothing was zero
-   and the session was still ruined. What `session-save.sh` enforces is **never
-   replace a saved session with a worse one, and never publish a pair whose two
-   halves came from different saves**.
+   That specific race is gone by construction now: hyprresume's daemon, if
+   installed, writes its own directory
+   (`~/.local/share/hyprresume/sessions`); we write ours
+   (`~/.local/share/omasession/sessions`). Two processes writing two different
+   files cannot tear the same pair. But the invariant it forced is still the
+   right one, because our own capture can still fail on its own — a `hyprctl`
+   timeout, a save killed mid-write — so `session-save.sh` still enforces
+   **never replace a saved session with a worse one, and never publish a pair
+   whose two halves came from different saves**:
 
-   It does that by never letting hyprresume near the published file. `hyprresume
-   save <name>` writes `<name>.toml` and touches nothing else, so each save
-   stages into a generation of its own, is validated against the screen it was
-   taken from, gets an fsync (hyprresume performs none — no such call exists in
-   the 0.5.0 binary), and only then becomes `last`, with the generation it
-   replaces kept as `last.prev`. Both halves carry the same generation stamp,
-   because two renames are not a transaction: rather than pretend otherwise, the
-   replay detects a torn pair and falls back to the previous generation instead
-   of matching browser windows against titles from a different capture.
+   Each save stages into a generation of its own, is validated against the
+   screen it was taken from, gets an fsync (capture.py writes to stdout, not to
+   disk — this script decides if and when the bytes are durable), and only
+   then becomes `last`, with the generation it replaces kept as `last.prev`.
+   Both halves carry the same generation stamp, because two renames are not a
+   transaction: rather than pretend otherwise, the replay detects a torn pair
+   and falls back to the previous generation instead of matching browser
+   windows against titles from a different capture.
 
-   Measured: 20 kills at random points mid-save, alternating SIGTERM and
-   SIGKILL, produced no torn pair and no orphaned staging file.
-   `test/guard-cases.sh` holds the cases — 20 assertions, run against a live
-   Hyprland.
+   Measured: 25 assertions in `test/guard-cases.sh`, run against a live
+   Hyprland with the capture.py-based pipeline, including killing the save at
+   random and at the exact instant between the two publish renames — 25/25.
 
 ## 3. The Hyprland 0.56 Lua IPC
 
@@ -171,9 +191,11 @@ Until it exists, placement is restored and tabs are not.
 ## 6. Layout
 
 ```
-bin/omasession        CLI: save, restore, status, install
+bin/omasession        CLI: save, restore, status, resolve, install, config
 lib/replay.py         the replay engine (validated)
-lib/session-save.sh   hyprresume save + title sidecar + empty-overwrite guard
+lib/capture.py        our own hyprctl-based capture (§2)
+lib/resolve.py        the command resolver capture.py calls (docs/plans/003)
+lib/session-save.sh   capture + title sidecar + generation guard
 bin/browser-setup     one-time root step: per-vendor policy files
 systemd/              snapshot timer, pre-shutdown hook (pending)
 Panel.qml             bar widget

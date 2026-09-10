@@ -115,8 +115,8 @@ random and at the exact instant between the two publish renames).
 ## Docs
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — what was measured, what it forced, and
-  where the boundary with hyprresume sits.
-- [`docs/PANEL.md`](docs/PANEL.md) — the panel's three states, and the Omarchy
+  why hyprresume is no longer in the execution path at all.
+- [`docs/PANEL.md`](docs/PANEL.md) — the panel's two states, and the Omarchy
   shell traps that cost the most (a bar widget with no `implicitWidth` renders
   nothing and reports nothing).
 - [`docs/plans/`](docs/plans/) — open questions and closed ones.

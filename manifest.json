@@ -28,7 +28,7 @@
         "key": "saveIntervalSec",
         "type": "integer",
         "label": "Snapshot interval (seconds)",
-        "description": "How stale the session may be after a power loss. hyprresume defaults to 120; a crash-prone machine wants less.",
+        "description": "How stale the session may be after a power loss. A crash-prone machine wants less.",
         "min": 10,
         "max": 3600,
         "step": 10,

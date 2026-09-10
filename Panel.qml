@@ -31,11 +31,10 @@ Panel {
   // guess at it: `real` is populated by parsing that command's output, and
   // `mock` is kept only because test/shoot.sh needs a session to render that
   // does not depend on whatever happens to be open in the lab guest at the
-  // time. Three states worth keeping there, switchable by `scenario`:
+  // time. Two states worth keeping there, switchable by `scenario`:
   //   healthy    a recent snapshot, nothing wrong
   //   refused    the guard blocked a save (exit 3) -- the case that used to
   //              destroy the session silently, so it must be visible
-  //   contested  hyprresume's daemon is running, writing the same files
   property bool mockMode: false
   property string scenario: "healthy"
 
@@ -45,7 +44,7 @@ Panel {
   readonly property var mock: ({
     "healthy": {
       "windows": 4, "workspaces": 4, "agoSec": 42, "refused": false, "detail": "",
-      "daemonActive": false, "intervalSec": 30, "restoreOnLogin": true,
+      "intervalSec": 30, "restoreOnLogin": true,
       "captured": [
         { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "detail": "~/Devs/my project", "warn": "", "resolvable": true },
         { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "detail": "", "warn": "", "resolvable": true },
@@ -56,19 +55,12 @@ Panel {
     "refused": {
       "windows": 4, "workspaces": 4, "agoSec": 214, "refused": true,
       "detail": "partial save blocked: 1 window written, 4 on screen",
-      "daemonActive": false, "intervalSec": 30, "restoreOnLogin": true,
+      "intervalSec": 30, "restoreOnLogin": true,
       "captured": [
         { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "detail": "~/Devs/my project", "warn": "", "resolvable": true },
         { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "detail": "", "warn": "", "resolvable": true },
         { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "detail": "", "warn": "", "resolvable": true },
         { "ws": 4, "mon": "HDMI-A-1", "cls": "some.unknown.App",     "app": "App",      "title": "no desktop entry", "detail": "", "warn": "", "resolvable": false }
-      ]
-    },
-    "contested": {
-      "windows": 1, "workspaces": 1, "agoSec": 8, "refused": false, "detail": "",
-      "daemonActive": true, "intervalSec": 30, "restoreOnLogin": false,
-      "captured": [
-        { "ws": 1, "mon": "DP-1", "cls": "foot", "app": "Foot", "title": "tmux", "detail": "", "warn": "directory not recoverable", "resolvable": true }
       ]
     }
   })
@@ -211,8 +203,7 @@ Panel {
   }
   readonly property var captured:      status ? status.captured : []
   readonly property bool guardRefused: status ? status.refused : false
-  readonly property bool daemonActive: status ? status.daemonActive : false
-  readonly property bool attention:    guardRefused || daemonActive
+  readonly property bool attention:    guardRefused
 
   readonly property color fg: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(fg, 1.55)
@@ -475,26 +466,6 @@ Panel {
             font.pixelSize: Style.font.bodySmall
             text: "Last save refused, session preserved — "
                   + (root.status ? root.status.detail : "")
-          }
-        }
-
-        Rectangle {
-          visible: root.daemonActive
-          width: parent.width
-          height: daemonText.implicitHeight + Style.space(12)
-          radius: Style.space(3)
-          color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
-          Text {
-            id: daemonText
-            anchors.left: parent.left; anchors.right: parent.right
-            anchors.margins: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            wrapMode: Text.WordWrap
-            color: root.fg
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            text: "hyprresume's daemon is writing the same session files. "
-                + "Run `omasession install` to disarm it."
           }
         }
 

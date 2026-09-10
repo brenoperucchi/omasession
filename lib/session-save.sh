@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
-# Save a session: hyprresume's own save, plus the one field it does not record,
-# behind a guard that refuses to replace a good session with a worse one.
+# Save a session: our own capture (lib/capture.py), plus the one field it
+# cannot see from a static hyprctl dump, behind a guard that refuses to
+# replace a good session with a worse one.
 #
-# hyprresume writes app_id, workspace, geometry and cwd -- everything except
+# capture.py writes app_id, workspace, geometry and cwd -- everything except
 # what distinguishes one browser window from another. Without a title there is
 # no way to send a restored Chromium window back to the workspace it came from,
 # because all of them share a PID, a command line and a class.
+#
+# Why capture.py and not hyprresume save, which did the same job until
+# 2026-09-09: hyprresume resolves a custom-classed window (no .desktop entry --
+# `--class`/`--app-id` set by the launcher itself) by its binary's own
+# /proc/<pid>/exe, discarding every command-line argument. Measured on a real
+# case, not a synthetic one: the Herdr TUI runs as
+# `foot --app-id=TUI.tile herdr`, and `hyprresume resolve TUI.tile` returns
+# bare `foot` -- the window comes back as an empty terminal, herdr never
+# started. lib/resolve.py resolves the same window from /proc/<pid>/cmdline
+# and returns the full command; capture.py is what puts that resolver on the
+# path replay.py actually reads from. See docs/plans/003-command-resolver.md.
 #
 # Why the guard is not just "refuse when the screen is empty":
 #
@@ -17,10 +29,8 @@
 #   window(s)", and reports success.
 #
 # So the invariant is "never replace a good session with a worse one", and that
-# is only checkable AFTER the new content exists. hyprresume writes last.toml in
-# place and honours no output-directory option (there is no HYPRRESUME_* string
-# in the 0.5.0 binary), so the only way to validate before publishing is to back
-# both files up, let it write, check what came out, and roll back if it is worse.
+# is only checkable AFTER the new content exists: stage the capture, check what
+# came out, and only publish it if it is not worse than what is already there.
 #
 # Exit codes:  0 saved   3 refused (session preserved)   4 another save running
 
@@ -32,20 +42,12 @@ if [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then
     export HYPRLAND_INSTANCE_SIGNATURE
 fi
 
-# O diretório é fixo porque o hyprresume não aceita outro: não há nenhuma
-# string HYPRRESUME_* no binário 0.5.0, e ele escreve sempre em
-# ~/.local/share/hyprresume/sessions. A versão anterior aceitava
-# OMASESSION_SESSION_DIR e usava-a para lock, backup, validação e sidecar --
-# enquanto o hyprresume continuava escrevendo no diretório padrão. O resultado
-# era pior que ignorar a variável: o guard protegia um caminho e o writer
-# escrevia noutro, e a sessão de verdade ficava fora do lock e fora da proteção.
-# Uma opção que finge isolar é a coisa exata que este projeto acusa nos outros.
-SESSION_DIR="$HOME/.local/share/hyprresume/sessions"
-if [[ -n "${OMASESSION_SESSION_DIR:-}" && "$OMASESSION_SESSION_DIR" != "$SESSION_DIR" ]]; then
-    printf 'session-save: OMASESSION_SESSION_DIR is not honoured -- hyprresume 0.5.0 always writes to %s\n' \
-        "$SESSION_DIR" >&2
-    exit 1
-fi
+# Nosso diretório, não mais o do hyprresume -- ver bin/omasession para o
+# porquê da migração. Antes esta variável não tinha efeito real: o writer era
+# hyprresume, que não aceita outro diretório, e uma variável que parecesse
+# redirecioná-lo movia o guard sem mover quem escreve de fato. Agora o writer é
+# nosso (capture.py, chamado abaixo), então honrá-la é honesto.
+SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/omasession/sessions}"
 NAME="${1:-last}"
 TOML="$SESSION_DIR/$NAME.toml"
 SIDECAR="$SESSION_DIR/$NAME.titles.json"
@@ -57,8 +59,8 @@ err() { printf 'session-save: %s\n' "$*" >&2; }
 mkdir -p "$SESSION_DIR"
 
 # One save at a time. The snapshot timer fires every 30s by default and a slow
-# hyprctl is enough to overlap two runs; two hyprresume saves racing on the same
-# file is a way to produce exactly the truncated toml this guard exists to catch.
+# hyprctl is enough to overlap two runs; two captures racing on the same file
+# is a way to produce exactly the truncated toml this guard exists to catch.
 exec 9>"$SESSION_DIR/.$NAME.lock"
 if ! flock -n 9; then
     err "another save is already running -- skipping this tick"
@@ -93,10 +95,9 @@ PY
 }
 
 # ── encenar, validar, publicar ───────────────────────────────────────────────
-# hyprresume aceita um NOME de sessão e escreve `<nome>.toml` no mesmo
-# diretório, sem tocar em nenhum outro -- verificado. Então ele nunca mais
-# escreve sobre a sessão publicada: escreve numa geração lateral, que só vira
-# `last` depois de validada.
+# capture.py escreve para o stdout -- não toca em arquivo nenhum, quem decide
+# o destino é este script. Então ele nunca escreve sobre a sessão publicada:
+# escreve numa geração lateral, que só vira `last` depois de validada.
 #
 # Isso substitui o backup-e-rollback anterior, que tinha um furo que a revisão
 # encontrou: entre a escrita do toml e o rename do sidecar existia uma janela em
@@ -115,7 +116,10 @@ STAGING="omasession.staging.$NAME.$$"
 STAGING_TOML="$SESSION_DIR/$STAGING.toml"
 STAGING_SIDECAR="$SESSION_DIR/$STAGING.titles.json"
 
-cleanup() { rm -f "$STAGING_TOML" "$STAGING_SIDECAR" "$SESSION_DIR/.$NAME.titles."*; }
+cleanup() {
+    rm -f "$STAGING_TOML" "$STAGING_TOML.raw" "$STAGING_SIDECAR" "$STAGING_SIDECAR.raw" \
+          "$SESSION_DIR/.$NAME.titles."* "${capture_err:-}"
+}
 trap cleanup EXIT
 
 # Varre stagings órfãos de execuções que morreram sem rodar o trap -- SIGKILL e
@@ -143,8 +147,23 @@ done
 count_old="$(toml_windows "$TOML")"
 (( count_old >= 0 )) || { err "existing $NAME.toml does not parse -- treating as empty"; count_old=0; }
 
+SELF_DIR="$(dirname "${BASH_SOURCE[0]}")"
+# Ponto de troca só para o guard-cases.sh: substituir a captura de verdade por
+# uma controlada é como se exercitam as decisões do guard sem depender de uma
+# falha real. Sem isto o teste teria de simular uma tela quebrada de verdade
+# para cada caso -- o que o antigo stub fazia interceptando `hyprresume` pelo
+# PATH, um mecanismo que deixou de existir quando a captura passou a ser
+# chamada por caminho, não por busca no PATH.
+CAPTURE="${OMASESSION_CAPTURE:-$SELF_DIR/capture.py}"
 rm -f "$STAGING_TOML"
-hyprresume save "$STAGING" >/dev/null
+capture_err="$(mktemp "$SESSION_DIR/.$NAME.capture-err.XXXXXX")"
+if ! python3 "$CAPTURE" "$NAME" > "$STAGING_TOML.raw" 2>"$capture_err"; then
+    err "capture failed: $(tail -3 "$capture_err")"
+    rm -f "$capture_err" "$STAGING_TOML.raw"
+    exit 3
+fi
+rm -f "$capture_err"
+mv -f "$STAGING_TOML.raw" "$STAGING_TOML"
 
 count_new="$(toml_windows "$STAGING_TOML")"
 
@@ -166,7 +185,7 @@ count_new="$(toml_windows "$STAGING_TOML")"
 # cobrem a mesma captura e publicam juntas, ou nada publica. E quem fechou
 # janelas de verdade continua salvando, porque aí count_new == count_screen.
 if (( count_new < 0 )); then
-    err "hyprresume produced a session that does not parse -- previous session kept"
+    err "capture produced a session that does not parse -- previous session kept"
     exit 3
 fi
 if (( count_new == 0 && count_old > 0 )); then
@@ -176,8 +195,9 @@ fi
 if (( count_new < count_screen )); then
     err "refusing an incomplete save: $count_new window(s) written, $count_screen on screen"
     # Escotilha, porque uma recusa permanente também é uma falha: se nesta
-    # máquina o hyprresume nunca dá conta de alguma janela, sem isto o usuário
-    # fica sem sessão nenhuma, o que é pior que uma sessão parcial declarada.
+    # máquina o `hyprctl clients` nunca dá conta de alguma janela, sem isto o
+    # usuário fica sem sessão nenhuma, o que é pior que uma sessão parcial
+    # declarada.
     if [[ "${OMASESSION_ALLOW_PARTIAL:-}" != "1" ]]; then
         err "  set OMASESSION_ALLOW_PARTIAL=1 to publish partial sessions on this machine"
         exit 3
@@ -228,10 +248,11 @@ python3 "$(dirname "${BASH_SOURCE[0]}")/annotate.py" "$STAGING_SIDECAR.raw" > "$
     2>/dev/null || mv -f "$STAGING_SIDECAR.raw" "$STAGING_SIDECAR"
 rm -f "$STAGING_SIDECAR.raw"
 
-# Durabilidade não é atomicidade, e o rename só garante a segunda. hyprresume
-# não faz fsync nenhum (nenhuma ocorrência no binário 0.5.0), então sem isto um
-# corte de energia logo após o save publica um arquivo cujo conteúdo ainda está
-# só no page cache -- e queda de energia é metade do motivo deste plugin.
+# Durabilidade não é atomicidade, e o rename só garante a segunda. capture.py
+# escreve para o stdout, não para disco -- quem decide se o conteúdo chega ao
+# disco de fato é este script, e sem isto um corte de energia logo após o save
+# publica um arquivo cujo conteúdo ainda está só no page cache -- e queda de
+# energia é metade do motivo deste plugin.
 #
 # E a falha do fsync IMPEDE publicar. A versão anterior a engolia com `|| true`
 # e publicava assim mesmo, anunciando uma durabilidade que não tinha conseguido:

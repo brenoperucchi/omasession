@@ -6,7 +6,7 @@
 #                                 (--if-enabled: só se restoreOnLogin estiver on)
 #   omasession status [--json]    what was captured, when, and what is wrong
 #   omasession resolve [--json]   which command each open window resolves to
-#   omasession install            timer, login restore, browser policy, hyprresume
+#   omasession install            timer, login restore, browser policy
 #   omasession uninstall          undo install
 #   omasession config get <key>   read one config value (empty if unset)
 #   omasession config set <key> <value>   persist one config value
@@ -25,10 +25,9 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omasession"
 CONFIG="$CONFIG_DIR/config.json"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omasession"
 SAVE_STATE="$STATE_DIR/last-save.json"
-# Fixo: o hyprresume 0.5.0 não aceita outro diretório (nenhuma string
-# HYPRRESUME_* no binário), então uma variável que parecesse redirecioná-lo
-# moveria o guard sem mover o writer. Ver lib/session-save.sh.
-SESSION_DIR="$HOME/.local/share/hyprresume/sessions"
+# Nosso diretório, não mais o do hyprresume -- ver lib/session-save.sh para o
+# porquê da migração. Honra a mesma variável que ele, por consistência.
+SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/omasession/sessions}"
 
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/autostart.lua"
@@ -76,22 +75,6 @@ hypr_env() {
         export HYPRLAND_INSTANCE_SIGNATURE
     fi
     [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]
-}
-
-# ── the writer we cannot control ─────────────────────────────────────────────
-# hyprresume's own daemon writes the same two files with a 120s autosave and no
-# guard. Our protection is worthless while it runs -- it already replaced a
-# five-window session with a one-window one during development -- and it does
-# not go through us, so the only honest thing is to detect it and say so.
-daemon_pids() {
-    # Sem argumentos = daemon. Com argumentos (`hyprresume save`) = operação
-    # pontual, possivelmente a nossa, e matá-la aborta um save legítimo.
-    local pid
-    for pid in $(pgrep -x -u "$(id -u)" hyprresume 2>/dev/null || true); do
-        local args
-        args="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/^[^ ]* *//;s/ *$//')"
-        [[ -z "$args" ]] && printf '%s\n' "$pid"
-    done
 }
 
 # ── save ─────────────────────────────────────────────────────────────────────
@@ -208,9 +191,6 @@ status_json() {
     local refused=false
     [[ "$rc" == "3" ]] && refused=true
 
-    local daemon=false
-    [[ -n "$(daemon_pids)" ]] && daemon=true
-
     local timer="inactive"
     systemctl --user is-active --quiet omasession-snapshot.timer 2>/dev/null && timer="active"
 
@@ -219,7 +199,6 @@ status_json() {
         --argjson agoSec "$ago" \
         --argjson refused "$refused" \
         --arg detail "$( [[ "$refused" == true ]] && printf '%s' "${message#session-save: }" )" \
-        --argjson daemonActive "$daemon" \
         --argjson captured "$captured" \
         --arg lastSave "$when" \
         --arg timer "$timer" \
@@ -230,7 +209,7 @@ status_json() {
         --argjson intervalSec "$(config_get saveIntervalSec "$DEFAULT_SAVE_INTERVAL")" \
         --argjson restoreOnLogin "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" \
         '{windows:$windows, workspaces:$workspaces, agoSec:$agoSec,
-          refused:$refused, detail:$detail, daemonActive:$daemonActive,
+          refused:$refused, detail:$detail,
           captured:$captured, lastSave:$lastSave, timer:$timer,
           intervalSec:$intervalSec, restoreOnLogin:$restoreOnLogin,
           session:$session, usingFallback:$fallback, notes:$notes}'
@@ -248,12 +227,11 @@ cmd_status() {
     if (( json )); then status_json "$name"; return; fi
 
     local s; s="$(status_json "$name")"
-    local windows ago refused detail daemon timer
+    local windows ago refused detail timer
     windows="$(jq -r .windows <<<"$s")"
     ago="$(jq -r .agoSec <<<"$s")"
     refused="$(jq -r .refused <<<"$s")"
     detail="$(jq -r .detail <<<"$s")"
-    daemon="$(jq -r .daemonActive <<<"$s")"
     timer="$(jq -r .timer <<<"$s")"
 
     if (( ago < 0 )); then
@@ -270,7 +248,6 @@ cmd_status() {
         err "the current session is not usable; the restore would use the previous generation"
     [[ "$timer" == active ]] || err "snapshot timer is not running (omasession install)"
     [[ "$refused" == false ]] || err "last save refused -- session preserved: $detail"
-    [[ "$daemon" == false ]] || err "hyprresume's daemon is running and writes the same files; it defeats the save guard (omasession install disarms it)"
     jq -r '.captured[]? | "  ws\(.ws)  \(.cls)  \(.title)"' <<<"$s"
 }
 
@@ -352,17 +329,11 @@ UNIT
 autostart_line() { printf 'o.launch_on_start("%s/bin/omasession restore --if-enabled")' "$SELF"; }
 
 # Um unico backup, tirado antes da primeira modificacao e nunca sobrescrito.
-# A versao anterior fazia `cp` em dois lugares: o segundo salvava o arquivo JA
-# modificado pelo primeiro, e o uninstall entao "restaurava" um autostart.lua
-# que continuava com o hyprresume desarmado -- anunciando um desfazer que nao
-# desfazia. Medido no guest: apos install+uninstall a linha do hyprresume
-# seguia comentada.
-# Marcadores. Toda edição nossa no autostart.lua carrega um destes, porque o
-# desfazer tem de ser cirúrgico: restaurar o arquivo inteiro do backup apaga o
-# que o usuário adicionou DEPOIS do install. Medido na revisão -- install, o
+# Marcador: toda edição nossa no autostart.lua carrega um destes, porque o
+# desfazer tem de ser cirúrgico -- restaurar o arquivo inteiro do backup apaga
+# o que o usuário adicionou DEPOIS do install. Medido na revisão -- install, o
 # usuário acrescenta um app, uninstall, e o app dele some.
 MARK_LOGIN="-- OmaSession: reopen the last session at login"
-MARK_DISARM="-- omasession: disarmed, see docs/DESIGN.md §2 -- "
 
 backup_autostart() {
     [[ -f "$AUTOSTART" ]] || return 0
@@ -404,42 +375,9 @@ remove_login_restore() {
     fi
 }
 
-rearm_hyprresume() {
-    [[ -f "$AUTOSTART" ]] || return 0
-    grep -qF -- "$MARK_DISARM" "$AUTOSTART" || return 0
-    local tmp; tmp="$(mktemp "$AUTOSTART.XXXXXX")"
-    # Tira só o prefixo que nós pusemos, devolvendo a linha original.
-    sed "s|^${MARK_DISARM}||" "$AUTOSTART" > "$tmp" && mv -f "$tmp" "$AUTOSTART"
-    say "hyprresume re-armed in autostart.lua"
-}
-
-disarm_hyprresume() {
-    local acted=0
-    # Casa a chamada com ou sem wrapper (uwsm app -- hyprresume), que a revisão
-    # apontou como forma real que a versão anterior deixava passar.
-    if [[ -f "$AUTOSTART" ]] && grep -qE '^[[:space:]]*o\.launch_on_start\("[^"]*hyprresume' "$AUTOSTART"; then
-        backup_autostart
-        local tmp; tmp="$(mktemp "$AUTOSTART.XXXXXX")"
-        sed "s|^\([[:space:]]*o\.launch_on_start(\"[^\"]*hyprresume\)|${MARK_DISARM}\1|" \
-            "$AUTOSTART" > "$tmp" && mv -f "$tmp" "$AUTOSTART"
-        acted=1
-    fi
-    # Só o daemon. `hyprresume save` é uma invocação pontual -- possivelmente a
-    # nossa, rodando agora -- e matá-la aborta um save legítimo.
-    local pids; pids="$(daemon_pids)"
-    if [[ -n "$pids" ]]; then
-        # PIDs resolvidos e sinalizados um a um. Nunca `pkill -f hyprresume`:
-        # o padrão casa a própria linha de comando deste script.
-        kill -TERM $pids 2>/dev/null || true
-        acted=1
-    fi
-    (( acted )) && say "hyprresume daemon disarmed (it autosaves over the same files, with no guard)" || true
-}
-
 cmd_install() {
     command -v jq >/dev/null || die "jq is required"
     command -v python3 >/dev/null || die "python3 is required"
-    command -v hyprresume >/dev/null || err "hyprresume not found -- 'save' needs it (see docs/DESIGN.md §2)"
 
     mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$SESSION_DIR"
     if [[ ! -f "$CONFIG" ]]; then
@@ -450,7 +388,6 @@ cmd_install() {
         say "config written to $CONFIG"
     fi
 
-    disarm_hyprresume
     # Disable before rewriting: `enable` never removes a symlink left by an
     # older [Install] section, so upgrading from a version anchored on a
     # different target (graphical-session.target -- see write_units for why
@@ -481,7 +418,6 @@ cmd_uninstall() {
     # Desfaz só o que instalamos. Restaurar o backup inteiro descartaria tudo
     # que o usuário editou depois do install -- P0 da rodada 2.
     remove_login_restore
-    rearm_hyprresume
     if [[ -f "$AUTOSTART.omasession.bak" ]]; then
         say "backup kept at $(basename "$AUTOSTART").omasession.bak (not applied)"
     fi

@@ -9,14 +9,20 @@ naquele instante.
 
 ![estado normal](../screenshots/panel-healthy.png)
 
-Três estados no bloco `mock`, alternáveis pela propriedade `scenario` (só têm
+Dois estados no bloco `mock`, alternáveis pela propriedade `scenario` (só têm
 efeito com `mockMode: true`):
 
 | `scenario` | O que mostra | Por que existe |
 |---|---|---|
 | `healthy` | `All N come back`, sem avisos | O estado normal |
 | `refused` | `N of M come back` em vermelho + banner `partial save blocked: ...` | O guard recusando é meia notícia boa (preservou a sessão) e meia ruim (o snapshot está mais velho do que parece). A versão que só escrevia no journal é como uma sessão se perdeu sem ninguém ver |
-| `contested` | banner sobre o daemon do hyprresume | Se outro processo escreve os mesmos arquivos, nosso guard não protege nada. É a única defesa possível: dizer |
+
+Existiu um terceiro estado, `contested`, para o banner "hyprresume's daemon is
+writing the same session files" -- removido em 2026-09-10 junto com a própria
+captura via hyprresume (ver `docs/plans/003-command-resolver.md`). A captura
+agora é nossa (`lib/capture.py`), escreve só no diretório do OmaSession, e
+outro processo escrevendo *seu próprio* `~/.local/share/hyprresume/sessions`
+não compete com nada que a gente lê.
 
 O bloco `mock` continua sendo **o contrato**: a forma que `status --json` tem
 de produzir, mantida em sincronia manual com `lib/effective.py` +

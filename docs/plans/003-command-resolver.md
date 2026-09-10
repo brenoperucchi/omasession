@@ -1,9 +1,11 @@
 # 003 — O resolvedor de comando: apps arbitrários sem configuração
 
-**Status:** resolvedor escrito e medido (`lib/resolve.py`, `omasession resolve`).
-Falta trocar a captura do hyprresume pela nossa — o passo 3 abaixo. Deixou de
-ser melhoria teórica em 2026-09-09: um caso real de uso quebrou por causa
-exatamente disso — ver "Evidência que fecha a decisão" abaixo.
+**Status:** fechado em 2026-09-10. `lib/capture.py` substituiu `hyprresume
+save` (passo 3 abaixo); `lib/session-save.sh` chama só o nosso código, e
+`bin/omasession` não conhece mais o hyprresume — nada para checar, desarmar ou
+rearmar. Validado no lab com reboot real: o cenário do Herdr (a evidência que
+fechou a decisão) volta com o `herdr` de verdade rodando dentro da janela, sem
+duplicação. `test/guard-cases.sh`: 25/25 contra o novo pipeline.
 
 ## Evidência que fecha a decisão (2026-09-09)
 
@@ -135,20 +137,16 @@ três níveis, e quando só encontra um cliente de multiplexador devolve
 
 ## Ordem
 
-1. Escrever `lib/resolve.py` com os quatro caminhos e um `resolve --explain`
-   no CLI, que diz por qual caminho cada janela foi resolvida. Sem isso, um
-   resolvedor errado é indistinguível de um app que não abre.
-2. Medir a tabela acima no lab.
-3. Só então trocar a leitura do `last.toml` por captura própria, e o
-   `hyprresume` deixa de ser dependência. Manter o formato do arquivo: o
-   `test/fixtures/last.toml` é o contrato, e a troca deve ser invisível para o
-   `replay.py`.
+1. ~~Escrever `lib/resolve.py` com os quatro caminhos e um `resolve --explain`
+   no CLI~~ — feito.
+2. ~~Medir a tabela acima no lab~~ — feito.
+3. ~~Trocar a leitura do `last.toml` por captura própria~~ — feito
+   (`lib/capture.py`, chamado por `lib/session-save.sh`). O formato do arquivo
+   não mudou: `test/fixtures/last.toml` continua o contrato, e a troca foi
+   invisível para o `replay.py` — nenhuma linha dele mudou.
 
 ## O que não fazer
 
 - Não copiar a whitelist. Uma tabela de oito classes é o problema, não a
   solução; se o resolvedor precisar de casos especiais, que sejam exceções
   sobre um mecanismo geral, não o mecanismo.
-- Não remover o `hyprresume` antes de (2) passar. Ele funciona hoje; trocar um
-  resolvedor que funciona por um que ainda não foi medido é a troca que este
-  projeto passou a semana inteira criticando.

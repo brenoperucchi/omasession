@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Renderiza um cenario do mockup no guest do lab e traz o PNG para ca.
 #
-#   ./shoot.sh healthy|refused|contested [crop]
+#   ./shoot.sh healthy|refused [crop]
 #
 # Saida em $OMASESSION_SHOT_DIR (default: um mktemp -d, cujo caminho e impresso).
 # Iterar o Panel.qml na maquina de trabalho e o que docs/DESIGN.md 6 proibe:

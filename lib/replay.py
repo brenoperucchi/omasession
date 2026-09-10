@@ -33,7 +33,7 @@ import time
 import tomllib
 from pathlib import Path
 
-SESSION = Path.home() / ".local/share/hyprresume/sessions/last.toml"
+SESSION = Path.home() / ".local/share/omasession/sessions/last.toml"
 WINDOW_TIMEOUT = 15.0
 BROWSER_TIMEOUT = 40.0
 BROWSER_QUIET = 4.0     # no new window for this long = the browser is done

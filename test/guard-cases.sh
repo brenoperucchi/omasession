@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cases the session-save guard has to get right. Runs inside the guest: needs a
-# live Hyprland and hyprresume, and it drives real windows.
+# live Hyprland, and it drives real windows.
 #
 # The guard exists because the first version of it did not protect the file that
 # matters. Measured on 2026-09-08 against the version at commit aef8f0b, with an
@@ -29,7 +29,11 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export REPLAY="$SELF_DIR/lib/replay.py"
 SAVE="${OMASESSION_SAVE:-$SELF_DIR/lib/session-save.sh}"
 [[ -x "$SAVE" ]] || { echo "guard-cases: não encontrei $SAVE" >&2; exit 1; }
-S="$HOME/.local/share/hyprresume/sessions"
+# Precisa bater com o default de session-save.sh (que agora honra a mesma
+# variável de verdade -- ver bin/omasession), e exportamos para que o processo
+# testado e o teste concordem mesmo se o ambiente não a tivesse definida.
+export OMASESSION_SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/omasession/sessions}"
+S="$OMASESSION_SESSION_DIR"
 STUB="$(mktemp -d)"
 BACKUP="$(mktemp -d)"
 KEEP=0
@@ -63,25 +67,29 @@ close_all()     { for a in $(hyprctl clients -j | jq -r '.[]|select(.mapped)|.ad
                       hyprctl repl "hl.dispatch(hl.dsp.window.close{window=\"address:$a\"})" >/dev/null
                   done; sleep 4; }
 
-cat > "$STUB/hyprresume" <<'STUBEOF'
-#!/usr/bin/env bash
-# Produz um toml controlado para exercitar as decisões do guard sem esperar uma
-# falha real do hyprresume.
-#
-# Honra o NOME pedido, como o hyprresume de verdade: `save <nome>` escreve
-# `<nome>.toml` e não toca em nenhum outro -- verificado no 0.5.0. Um stub que
-# escrevesse direto em `last.toml` estaria testando um mecanismo que não existe
-# mais, e passaria a reprovar o código por fazer a coisa certa.
-S=$HOME/.local/share/hyprresume/sessions
-NAME="${2:-last}"
-case "${STUB_MODE:-partial}" in
-  partial) printf '[session]\nname = "%s"\n\n[[window]]\napp_id = "foot"\nlaunch_cmd = "foot"\nworkspace = "1"\n' "$NAME" > "$S/$NAME.toml" ;;
-  garbage) printf '[session\nnot toml ][\n' > "$S/$NAME.toml" ;;
-  empty)   printf '[session]\nname = "%s"\n' "$NAME" > "$S/$NAME.toml" ;;
-  crash)   exit 7 ;;
-esac
+cat > "$STUB/capture.py" <<'STUBEOF'
+#!/usr/bin/env python3
+# Produz um toml controlado no stdout para exercitar as decisões do guard sem
+# esperar uma falha real da captura. Honra o mesmo contrato do capture.py de
+# verdade -- argv[1] é o NOME, o conteúdo sai pelo stdout, quem decide onde
+# gravar é o session-save.sh -- selecionado via OMASESSION_CAPTURE em vez de
+# interceptar um binário pelo PATH, que era como o hyprresume era substituído
+# aqui antes de a captura passar a ser nossa e chamada por caminho direto.
+import os, sys
+name = sys.argv[1] if len(sys.argv) > 1 else "last"
+mode = os.environ.get("STUB_MODE", "partial")
+if mode == "partial":
+    sys.stdout.write(
+        '[session]\nname = "%s"\n\n[[window]]\napp_id = "foot"\n'
+        'launch_cmd = "foot"\nworkspace = "1"\n' % name)
+elif mode == "garbage":
+    sys.stdout.write('[session\nnot toml ][\n')
+elif mode == "empty":
+    sys.stdout.write('[session]\nname = "%s"\n' % name)
+elif mode == "crash":
+    sys.exit(7)
 STUBEOF
-chmod +x "$STUB/hyprresume"
+chmod +x "$STUB/capture.py"
 
 cp -a "$S/." "$BACKUP/" 2>/dev/null || true
 restore_session() { rm -rf "${S:?}"/*; cp -a "$BACKUP/." "$S/" 2>/dev/null || true; }
@@ -101,7 +109,7 @@ check "par consistente"                "$(toml_count)" "$(sidecar_count)"
 echo "== recusas: cada uma preserva OS DOIS arquivos byte a byte"
 for mode in partial garbage empty crash; do
     before="$(fingerprint)"
-    STUB_MODE="$mode" PATH="$STUB:$PATH" "$SAVE" >/dev/null 2>&1; rc=$?
+    STUB_MODE="$mode" OMASESSION_CAPTURE="$STUB/capture.py" "$SAVE" >/dev/null 2>&1; rc=$?
     check "$mode: nao publica"        "nao-zero" "$( ((rc)) && echo nao-zero || echo zero)"
     check "$mode: arquivos intactos"  "$before"  "$(fingerprint)"
 done
@@ -115,7 +123,7 @@ sleep 3
 printf '[session]\nname = "last"\n\n[[window]]\napp_id = "foot"\nlaunch_cmd = "foot"\nworkspace = "1"\n' > "$S/last.toml"
 rm -f "$S/last.titles.json"
 before="$(fingerprint)"
-STUB_MODE=partial PATH="$STUB:$PATH" "$SAVE" >/dev/null 2>&1; rc=$?
+STUB_MODE=partial OMASESSION_CAPTURE="$STUB/capture.py" "$SAVE" >/dev/null 2>&1; rc=$?
 check "com 1 salva e a tela cheia, recusa" "3" "$rc"
 check "e nao mexe nos arquivos"            "$before" "$(fingerprint)"
 
