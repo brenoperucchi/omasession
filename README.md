@@ -61,6 +61,15 @@ that failed to open.
 A window it cannot resolve is reported as such — before the reboot, in the
 panel, not discovered afterwards.
 
+A terminal whose real content lives in a tmux client is one such case the
+resolver used to give up on honestly rather than guess. Now it asks tmux
+directly: the window comes back with `tmux new -A -s <name>` instead of a bare
+terminal, and whatever was in that session is `tmux-resurrect`'s job, not
+ours. Measured across a real reboot: two windows that used to come back as an
+empty shell in `$HOME` — no tmux server even started — now reattach to the
+exact session they had, no duplicates. See
+[`docs/plans/005-tmux-session-recovery.md`](docs/plans/005-tmux-session-recovery.md).
+
 ## Browser tabs come back too, and the reason is not what we assumed
 
 The open question was why browser tabs never survived a reboot. The answer,

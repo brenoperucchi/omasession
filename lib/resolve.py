@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 # Exec= field codes, to strip. %% is an escaped percent and is left alone here
@@ -48,6 +49,17 @@ TERMINAL_CWD_FLAG = {
     "com.mitchellh.ghostty": "--working-directory",
     "org.wezfurlong.wezterm": "--cwd",
 }
+
+# Terminals confirmed to accept a bare trailing command (`foot -- cmd args`,
+# no -e/-- dialect to get wrong) -- a different fact than TERMINAL_CWD_FLAG's
+# cwd-flag dialect, and not assumed to be the same set. `foot` measured
+# directly (docs/plans/005): `foot -D dir -- tmux new` reattaches correctly.
+# `kitty` is measured indirectly but just as concretely: every real kitty
+# window in this project's own captures resolves via `cmdline` and relaunches
+# correctly with its trailing args intact (README, "19/19", two custom kitty
+# classes). Alacritty/ghostty/wezterm are not in this set because nothing in
+# this project has ever launched one -- not because they are known to differ.
+TRAILING_ARGV_TERMINALS = {"foot", "kitty"}
 
 # Applications that own every one of their windows from a single process. There
 # is no point launching one per saved window: the second invocation talks to the
@@ -294,6 +306,67 @@ def child_cwd(pid: int) -> tuple[str | None, str]:
     return None, "no shell found under the terminal"
 
 
+def tmux_session(pid: int) -> tuple[str | None, str | None, str]:
+    """The tmux session a terminal's own client is attached to, or (None, None, why).
+
+    Returns (session_name, session_path, why). session_path is tmux's own
+    record of the session's cwd -- a bonus, not the point: the reattach itself
+    is what matters, this just lets the panel say a real directory instead of
+    "not recoverable" for a window that is, in fact, going to recover it.
+
+    Measured 2026-09-10 (docs/plans/005): a terminal window whose content lives
+    in a tmux client resolves today via .desktop/cmdline same as any other
+    terminal -- the resolved command reopens the emulator, not the session, and
+    a real reboot confirmed the result: two windows came back running a bare
+    shell in $HOME, no tmux server even started. tmux itself already tracks
+    which session a client is attached to; asking it is cheaper and more
+    correct than inferring it from the process tree the way child_cwd() must
+    for a plain cwd.
+
+    Deliberately narrower than child_cwd(): only the default tmux socket is
+    queried (a client on a different `-L`/`-S` socket is invisible to
+    `tmux list-clients` here, same honest gap as the multiplexers child_cwd()
+    does not attempt). A terminal serving more than one tmux client cannot say
+    which one is this window's, same ambiguity and same refusal as child_cwd().
+    """
+    clients: list[str] = []
+    seen, queue = set(), [(str(pid), 0)]
+    while queue:
+        current, depth = queue.pop(0)
+        if current in seen or depth > 3:
+            continue
+        seen.add(current)
+        for kid in _children(current):
+            if _comm(kid) == "tmux: client":
+                clients.append(kid)
+                continue
+            queue.append((kid, depth + 1))
+
+    if not clients:
+        return None, None, "no tmux client under this terminal"
+    if len(clients) > 1:
+        return None, None, (f"{len(clients)} tmux clients under this terminal; "
+                            f"cannot tell which one is this window")
+
+    try:
+        out = subprocess.run(
+            ["tmux", "list-clients", "-F",
+             "#{client_pid} #{session_name} #{session_path}"],
+            capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None, "tmux not reachable"
+    if out.returncode != 0:
+        return None, None, "no tmux server on the default socket"
+
+    target = clients[0]
+    for line in out.stdout.splitlines():
+        client_pid, _, rest = line.partition(" ")
+        name, _, path = rest.partition(" ")
+        if client_pid == target:
+            return name, (path or None), f"tmux client {target}"
+    return None, None, "tmux client not listed by list-clients (already detached?)"
+
+
 def window_class(window: dict) -> str:
     return window.get("initialClass") or window.get("class") or ""
 
@@ -348,6 +421,22 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
             flag = TERMINAL_CWD_FLAG[klass]
             if result["argv"] and not any(a.startswith(flag) for a in result["argv"]):
                 result["argv"] = result["argv"] + [f"{flag}={cwd}"]
+        elif klass in TRAILING_ARGV_TERMINALS:
+            # child_cwd() found no shell of its own -- the usual reason is a
+            # tmux client sitting where the shell should be. Reattaching to
+            # its session is a better answer than the cwd we cannot get: the
+            # window comes back inside the right session instead of a bare
+            # shell in $HOME, and tmux answers its own pane's cwd from there.
+            session, session_path, tmux_why = tmux_session(pid)
+            result["tmux_note"] = tmux_why
+            if session and result["argv"]:
+                result["tmux_session"] = session
+                result["argv"] = result["argv"] + ["--", "tmux", "new", "-A", "-s", session]
+                if session_path:
+                    # A cwd for the panel and a fallback if the reattach itself
+                    # ever fails -- replay.py already knows to insert this
+                    # before the `--`, exactly the case its own comment names.
+                    result["cwd"] = session_path
 
     return result
 
