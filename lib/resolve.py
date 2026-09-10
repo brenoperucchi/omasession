@@ -375,6 +375,71 @@ def tmux_session(pid: int) -> tuple[str | None, str | None, str]:
     return None, None, "tmux client not listed by list-clients (already detached?)"
 
 
+# `env` flags that take a separate value, so skip_env_wrapper() does not
+# mistake the value for the real binary. Measured real case in this project's
+# own .desktop set: `Exec=env -u http_proxy ... zapzap`.
+_ENV_FLAGS_WITH_VALUE = {"-u", "--unset", "-C", "--chdir"}
+
+
+def skip_env_wrapper(argv: list[str]) -> list[str]:
+    """`argv` with a leading `env [OPTIONS] [KEY=VALUE...]` past, so whoever
+    looks at argv[0] sees the program env is launching, not env itself.
+
+    .desktop entries use `env` to set variables for launchers that take none
+    as flags -- exec_argv() leaves it alone on purpose, it is not ours to
+    remove from the recorded command, only to see past when classifying which
+    terminal this is. Round 5 skipped `KEY=VALUE` tokens but not `env` itself,
+    which has neither `-` nor `=` and so was never skipped -- found in round 6
+    by both reviewers, measured against the exact .desktop this project cites.
+    """
+    if not argv or Path(argv[0]).name != "env":
+        return argv
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _ENV_FLAGS_WITH_VALUE:
+            i += 2
+        elif tok.startswith("-"):
+            i += 1
+        elif "=" in tok:
+            i += 1
+        else:
+            break
+    return argv[i:]
+
+
+def child_command_start(argv: list[str]) -> int | None:
+    """Index in `argv` where the terminal's own flags end and whatever it was
+    told to run begins, or None if there is nothing after the terminal itself.
+
+    `--` is authoritative when present -- everything after it is the child,
+    everything before is the terminal's, full stop, no guessing which `tmux`
+    among several is the option value and which is the program (round 6:
+    `foot --title tmux -- tmux attach` has "tmux" twice, and a basename check
+    with no regard for position picked the wrong one, both reviewers measured
+    it independently).
+
+    Without `--`, foot's own launch of Herdr is the shape to get right:
+    `foot --app-id=X cmd`, no separator. The first token that is not itself a
+    flag AND whose preceding token cannot have consumed it as a value (a
+    self-contained `--flag=value` cannot; a bare `-flag`/`--flag` might) is
+    where the child starts. Imperfect for a terminal flag not on this project's
+    radar that takes a separate-token value, but foot and kitty -- the only
+    two this fires for -- do not have one that matters here.
+    """
+    if "--" in argv:
+        return argv.index("--") + 1
+    for i in range(1, len(argv)):
+        tok = argv[i]
+        if tok.startswith("-"):
+            continue
+        prev = argv[i - 1]
+        if prev.startswith("-") and "=" not in prev:
+            continue
+        return i
+    return None
+
+
 def window_class(window: dict) -> str:
     return window.get("initialClass") or window.get("class") or ""
 
@@ -427,16 +492,12 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
     # nenhuma das duas tabelas abaixo mesmo sendo, de fato, um foot. Medido na
     # revisão da rodada 4: sem checar também o binário já resolvido, esse caso
     # pula o bloco inteiro -- cwd e tmux ficam sem tentar, exatamente a janela
-    # que este mecanismo existe para cobrir. `env FOO=1 kitty` no Exec= de um
-    # .desktop mantém "env" como primeiro token de propósito (exec_argv não
-    # mexe nisso); pular tokens com "=" e sem "-" na frente acha o binário de
-    # verdade nesse caso também (achado da rodada 5).
+    # que este mecanismo existe para cobrir. skip_env_wrapper() é o que torna
+    # isto correto também atrás de um `env FOO=1 kitty` (rodada 6).
     resolved_bin = None
-    for a in result["argv"] or ():
-        if "=" in a and not a.startswith("-"):
-            continue
-        resolved_bin = Path(a).name
-        break
+    effective_argv = skip_env_wrapper(result["argv"]) if result["argv"] else None
+    if effective_argv:
+        resolved_bin = Path(effective_argv[0]).name
     cwd_flag = TERMINAL_CWD_FLAG.get(klass) or TERMINAL_CWD_FLAG.get(resolved_bin)
     wants_tmux = klass in TRAILING_ARGV_TERMINALS or resolved_bin in TRAILING_ARGV_TERMINALS
 
@@ -445,8 +506,26 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
         result["cwd_note"] = why
         if cwd and cwd_flag:
             result["cwd"] = cwd
-            if result["argv"] and not any(a.startswith(cwd_flag) for a in result["argv"]):
-                result["argv"] = result["argv"] + [f"{cwd_flag}={cwd}"]
+            argv = result["argv"]
+            if argv and not any(a.startswith(cwd_flag) for a in argv):
+                # Antes do `--`, não depois: achado da rodada 6 -- `foot
+                # --app-id=X -- bash` virava `foot --app-id=X -- bash
+                # --working-directory=Y`, entregando o flag pro bash, não pro
+                # foot -- inserir NO índice que child_command_start() devolve
+                # (logo depois do `--`) empurra o flag pro lado errado do
+                # separador, o mesmo tanto quanto deixá-lo no fim. O `--`,
+                # quando existe, é onde o foot para de procurar flags SEUS;
+                # o flag tem de ficar antes dele, não no índice que aponta
+                # pro que vem depois. Sem `--`, as duas fronteiras coincidem.
+                flag_arg = f"{cwd_flag}={cwd}"
+                if "--" in argv:
+                    insert_at = argv.index("--")
+                else:
+                    insert_at = child_command_start(argv)
+                if insert_at is None:
+                    result["argv"] = argv + [flag_arg]
+                else:
+                    result["argv"] = argv[:insert_at] + [flag_arg] + argv[insert_at:]
         elif not cwd and wants_tmux:
             # child_cwd() found no shell of its own -- the usual reason is a
             # tmux client sitting where the shell should be. Reattaching to
@@ -457,31 +536,34 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
             result["tmux_note"] = tmux_why
             if session and result["argv"]:
                 argv = result["argv"]
-                # Não "tem --", "o comando filho já é tmux": achado da rodada
-                # 5, dos dois revisores, em direções opostas da mesma regra
-                # errada. Um cmdline preservado de uma janela que JÁ roda tmux
-                # (sabemos que roda -- é assim que tmux_session() achou o
-                # cliente) às vezes tem `-- tmux ...` e às vezes não (foot
-                # aceita `foot --app-id=X cmd` sem separador -- é como o
-                # Herdr, o próprio caso motivador, se lança). "só age se não
-                # tiver --" deixava passar o segundo formato sem tocar
-                # (duplicava tmux); "só troca o que vier depois de --" perdia
-                # o -A quando o formato já usava -- (uma sessão criada sem -A,
-                # ou um `tmux attach` que falha se a sessão ainda não existe,
-                # ficam órfãos do mesmo jeito depois do reboot). A pergunta
-                # certa é onde está o "tmux" de verdade no argv, com ou sem
-                # separador, e substituir dali pra frente -- nunca acrescentar
-                # em cima de um comando que já é outra coisa (`-- btop`,
-                # `-- herdr`): esses não têm cliente tmux embaixo, então
-                # tmux_session() já teria devolvido None antes de chegar aqui.
-                tmux_idx = next((i for i, a in enumerate(argv)
-                                  if i > 0 and Path(a).name == "tmux"), None)
-                if tmux_idx is not None:
-                    result["argv"] = argv[:tmux_idx] + ["tmux", "new", "-A", "-s", session]
-                else:
+                # child_command_start(), não "primeiro token cujo basename é
+                # tmux": achado da rodada 6, dos dois revisores, com o mesmo
+                # contra-exemplo -- `foot --title tmux -- tmux attach` tem
+                # "tmux" duas vezes, uma como VALOR de --title, outra como o
+                # programa de verdade depois do --. Uma busca cega pelo
+                # primeiro basename=="tmux" cortava no valor da opção,
+                # jogando fora o -- e o tmux reais. A fronteira certa é a
+                # mesma que decide onde o comando filho começa (rodada 6,
+                # achado do cwd acima): só ali faz sentido perguntar "esse
+                # comando já é tmux?".
+                boundary = child_command_start(argv)
+                if boundary is not None and Path(argv[boundary]).name == "tmux":
+                    result["argv"] = argv[:boundary] + ["tmux", "new", "-A", "-s", session]
+                    result["tmux_session"] = session
+                elif boundary is None:
+                    # Sem comando filho nenhum (o caso .desktop, foot puro):
+                    # nada para confundir com o tmux, acrescenta com --.
                     result["argv"] = argv + ["--", "tmux", "new", "-A", "-s", session]
-                result["tmux_session"] = session
-                if session_path:
+                    result["tmux_session"] = session
+                # Um comando filho que não é tmux (boundary aponta pra outra
+                # coisa) não é tocado: tmux_session() só devolve uma sessão
+                # quando há um cliente tmux de verdade na árvore, mas isso não
+                # prova que o argv resolvido REFLETE esse cliente (um
+                # wrapper como `sh -c 'tmux new'` é o caso -- registrado no
+                # plano, não vale código para algo tão raro). Deixar como
+                # está é mais seguro que reescrever um comando que pode não
+                # ser tmux de jeito nenhum.
+                if result.get("tmux_session") and session_path:
                     # A cwd para o painel e uma queda-de-pau se o reattach em
                     # si falhar -- replay.py já sabe inserir isto antes de um
                     # `--`, exatamente o caso que seu próprio comentário cita.

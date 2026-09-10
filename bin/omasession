@@ -398,8 +398,26 @@ remove_login_restore() {
 # sempre este, independente de qualquer override atual.
 LEGACY_SESSION_DIR="$HOME/.local/share/hyprresume/sessions"
 
+# "Completa" é a pergunta certa, não "existe": achado da rodada 6 -- checar só
+# o toml deixava uma migração interrompida ENTRE os dois renames (toml já no
+# nome final, sidecar ainda não) permanentemente pela metade, porque uma
+# tentativa seguinte via o toml, achava que já tinha migrado, e desistia sem
+# nunca copiar o sidecar que faltava. Ausência de sidecar NA ORIGEM (uma
+# sessão salva pelo hyprresume puro, antes do sidecar existir) não conta
+# contra completude -- não há o que copiar.
+_legacy_migration_complete() { # _legacy_migration_complete <name> <sidecar-de-origem>
+    [[ -f "$SESSION_DIR/$1.toml" ]] || return 1
+    [[ -f "$2" ]] || return 0
+    [[ -f "$SESSION_DIR/$1.titles.json" ]]
+}
+
 migrate_legacy_session() {
     [[ -d "$LEGACY_SESSION_DIR" ]] || return 0
+    # Temporários de uma migração anterior morta por SIGKILL no meio do cp --
+    # achado da rodada 6. Seguro varrer sem checar idade nem /proc: só esta
+    # função os cria, e cada cp/mv abaixo usa um nome próprio recém-gerado,
+    # nunca um destes.
+    rm -f "$SESSION_DIR"/.migrate.*.?????? 2>/dev/null || true
     local toml name sidecar tmp_toml tmp_side
     # Toda sessão nomeada no diretório antigo, não só "last": a CLI sempre
     # aceitou `save [name]`/`restore [name]`, e a primeira versão desta
@@ -410,13 +428,10 @@ migrate_legacy_session() {
         [[ -e "$toml" ]] || continue
         name="$(basename "$toml" .toml)"
         case "$name" in omasession.*|*.prev) continue ;; esac
-        # Nunca sobrescreve uma sessão que o novo capturador já salvou, seja
-        # "last" ou um nome próprio -- achado da rodada 4: sem isto, quem
-        # atualiza e reinicia antes do primeiro save novo perde a última
-        # sessão boa que tinha.
-        [[ -f "$SESSION_DIR/$name.toml" ]] && continue
         sidecar="$LEGACY_SESSION_DIR/$name.titles.json"
-        [[ -f "$sidecar" ]] || continue
+        # Nunca sobrescreve uma sessão que o novo capturador já salvou por
+        # completo, seja "last" ou um nome próprio -- achado da rodada 4.
+        _legacy_migration_complete "$name" "$sidecar" && continue
 
         # O mesmo lock que save/restore respeitam para este nome: achado da
         # rodada 5, sem isto uma migração correndo ao lado de um save do
@@ -428,25 +443,51 @@ migrate_legacy_session() {
             exec 9>&-
             continue
         fi
+        # Reconfere JÁ com o lock: achado da rodada 6 -- a checagem acima
+        # roda antes de travar, e um save do mesmo nome pode publicar bem
+        # nessa janela. Sem reconferir aqui, a migração sobrescreveria uma
+        # sessão nova com a legada, o oposto do que a checagem existe pra
+        # evitar.
+        if _legacy_migration_complete "$name" "$sidecar"; then
+            exec 9>&-
+            continue
+        fi
 
         # Encena com nomes temporários e só troca pro nome final por rename:
         # achado da rodada 5, copiar direto pro nome final e ser interrompido
-        # no meio deixa um par pela metade (toml sem sidecar, ou vice-versa)
-        # que a checagem acima veria como "já existe" e nunca completaria
-        # numa tentativa seguinte.
+        # no meio deixava um par pela metade que a checagem de existência via
+        # como "já migrado". Agora a checagem é de completude (acima), então
+        # mesmo uma interrupção entre os dois renames abaixo se corrige numa
+        # tentativa seguinte -- mas encenar continua sendo o que evita
+        # publicar um toml a meio caminho de copiar.
         tmp_toml="$(mktemp "$SESSION_DIR/.migrate.$name.XXXXXX")"
-        tmp_side="$(mktemp "$SESSION_DIR/.migrate.$name.XXXXXX")"
-        if cp -p "$toml" "$tmp_toml" 2>/dev/null && cp -p "$sidecar" "$tmp_side" 2>/dev/null; then
-            mv -f "$tmp_toml" "$SESSION_DIR/$name.toml"
-            mv -f "$tmp_side" "$SESSION_DIR/$name.titles.json"
-            if [[ -f "$LEGACY_SESSION_DIR/$name.prev.toml" && -f "$LEGACY_SESSION_DIR/$name.prev.titles.json" ]]; then
-                cp -p "$LEGACY_SESSION_DIR/$name.prev.toml" "$SESSION_DIR/$name.prev.toml" 2>/dev/null || true
-                cp -p "$LEGACY_SESSION_DIR/$name.prev.titles.json" "$SESSION_DIR/$name.prev.titles.json" 2>/dev/null || true
+        if ! cp -p "$toml" "$tmp_toml" 2>/dev/null; then
+            err "could not migrate '$name' from $LEGACY_SESSION_DIR -- copying the session failed"
+            rm -f "$tmp_toml"
+            exec 9>&-
+            continue
+        fi
+        mv -f "$tmp_toml" "$SESSION_DIR/$name.toml"
+
+        if [[ -f "$sidecar" ]]; then
+            tmp_side="$(mktemp "$SESSION_DIR/.migrate.$name.XXXXXX")"
+            if cp -p "$sidecar" "$tmp_side" 2>/dev/null; then
+                mv -f "$tmp_side" "$SESSION_DIR/$name.titles.json"
+                say "migrated '$name' from $LEGACY_SESSION_DIR (left untouched there)"
+            else
+                rm -f "$tmp_side"
+                err "migrated '$name' but its title sidecar failed to copy -- browser windows in it won't re-match their workspace; a later install will retry"
             fi
-            say "migrated '$name' from $LEGACY_SESSION_DIR (left untouched there)"
         else
-            err "could not migrate '$name' from $LEGACY_SESSION_DIR -- copy failed"
-            rm -f "$tmp_toml" "$tmp_side"
+            # Sessão salva pelo hyprresume puro, antes do sidecar existir --
+            # achado da rodada 6: a versão anterior pulava em silêncio.
+            say "migrated '$name' from $LEGACY_SESSION_DIR without a title sidecar (an old save, from before this had one)"
+        fi
+
+        if [[ -f "$LEGACY_SESSION_DIR/$name.prev.toml" && -f "$LEGACY_SESSION_DIR/$name.prev.titles.json" \
+           && ! -f "$SESSION_DIR/$name.prev.toml" ]]; then
+            cp -p "$LEGACY_SESSION_DIR/$name.prev.toml" "$SESSION_DIR/$name.prev.toml" 2>/dev/null || true
+            cp -p "$LEGACY_SESSION_DIR/$name.prev.titles.json" "$SESSION_DIR/$name.prev.titles.json" 2>/dev/null || true
         fi
         exec 9>&-
     done

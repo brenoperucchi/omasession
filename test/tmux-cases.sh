@@ -68,7 +68,7 @@ close_all() {
     sleep 3
 }
 
-DIR_A="$(mktemp -d)"; DIR_B="$(mktemp -d)"
+DIR_A="$(mktemp -d)"; DIR_B="$(mktemp -d)"; DIR_C="$(mktemp -d)"
 SESS_A="omasession-test-a-$$"
 # Com espaço, de propósito: tmux aceita espaço em nome de sessão (a própria
 # mesh do usuário tem um, "Contratos Thera"), e a revisão desta rodada achou
@@ -76,11 +76,13 @@ SESS_A="omasession-test-a-$$"
 # nome e cwd em silêncio para exatamente este caso. Sem este caso o teste não
 # distingue o parsing certo do errado.
 SESS_B="omasession-test-b $$"
+SESS_C="omasession-test-c-$$"
 
 cleanup() {
     tmux kill-session -t "$SESS_A" 2>/dev/null || true
     tmux kill-session -t "$SESS_B" 2>/dev/null || true
-    rm -rf "$DIR_A" "$DIR_B"
+    tmux kill-session -t "$SESS_C" 2>/dev/null || true
+    rm -rf "$DIR_A" "$DIR_B" "$DIR_C"
     ((KEEP)) || close_all
 }
 trap cleanup EXIT
@@ -89,25 +91,38 @@ echo "== resolve: janela com tmux embaixo aponta pra sessão certa, não pro ter
 close_all
 tmux new -d -s "$SESS_A" -c "$DIR_A"
 tmux new -d -s "$SESS_B" -c "$DIR_B"
+tmux new -d -s "$SESS_C" -c "$DIR_C"
 sleep 1
 hyprctl repl "hl.dispatch(hl.dsp.exec_cmd(\"foot -- tmux attach -t '$SESS_A'\"))" >/dev/null
 sleep 3
 hyprctl repl "hl.dispatch(hl.dsp.exec_cmd(\"foot -- tmux attach -t '$SESS_B'\"))" >/dev/null
 sleep 3
+# Classe custom (--app-id), resolvida por cmdline (não .desktop), com o
+# cmdline JÁ apontando pro tmux: o ramo "substitui a cauda", não o ramo
+# "acrescenta" que as sessões A/B exercitam. É o ramo que regrediu duas vezes
+# entre as rodadas 4-6 sem nenhum teste automatizado tocá-lo -- achado
+# explícito dos dois revisores na rodada 6.
+hyprctl repl "hl.dispatch(hl.dsp.exec_cmd(\"foot --app-id=$SESS_C -- tmux attach -t '$SESS_C'\"))" >/dev/null
+sleep 3
 
 resolved="$("$OMASESSION" resolve --json)"
 cmd_a="$(jq -r --arg d "$SESS_A" '.[] | select(.tmux_session == $d) | .command' <<<"$resolved")"
 cmd_b="$(jq -r --arg d "$SESS_B" '.[] | select(.tmux_session == $d) | .command' <<<"$resolved")"
+cmd_c="$(jq -r --arg d "$SESS_C" '.[] | select(.tmux_session == $d) | .command' <<<"$resolved")"
 check "sessão A resolve pra 'tmux new -A -s'"  "foot -- tmux new -A -s $SESS_A" "$cmd_a"
 # command() passa o argv por shlex.quote -- um nome com espaço sai entre
 # aspas simples (`'omasession test b 12345'`), não solto. O valor esperado
 # tem de refletir isso, não só concatenar o nome cru.
 check "sessão B (nome com espaço) resolve pra 'tmux new -A -s', sem truncar"  "foot -- tmux new -A -s '$SESS_B'" "$cmd_b"
+check "sessão C (classe custom, cmdline já com tmux) reescreve a cauda pra incluir -A" \
+      "foot --app-id=$SESS_C -- tmux new -A -s $SESS_C" "$cmd_c"
 
 cwd_a="$(jq -r --arg d "$SESS_A" '.[] | select(.tmux_session == $d) | .cwd' <<<"$resolved")"
+cwd_c="$(jq -r --arg d "$SESS_C" '.[] | select(.tmux_session == $d) | .cwd' <<<"$resolved")"
 check "cwd da sessão A vem do tmux, não 'not recoverable'" "$DIR_A" "$cwd_a"
+check "cwd da sessão C (classe custom) também vem do tmux" "$DIR_C" "$cwd_c"
 
-echo "== ponta a ponta: fecha as duas janelas, restaura, e cada uma reanexa na sessão certa"
+echo "== ponta a ponta: fecha as janelas, restaura, e cada uma reanexa na sessão certa"
 "$OMASESSION" save tmux-cases-test >/dev/null
 close_all
 
@@ -116,11 +131,13 @@ sleep 3
 
 attached_a="$(tmux list-clients -F '#{session_name}' 2>/dev/null | grep -c "^${SESS_A}\$" || true)"
 attached_b="$(tmux list-clients -F '#{session_name}' 2>/dev/null | grep -c "^${SESS_B}\$" || true)"
+attached_c="$(tmux list-clients -F '#{session_name}' 2>/dev/null | grep -c "^${SESS_C}\$" || true)"
 check "sessão A tem exatamente 1 cliente reanexado" "1" "$attached_a"
 check "sessão B tem exatamente 1 cliente reanexado" "1" "$attached_b"
+check "sessão C (classe custom) tem exatamente 1 cliente reanexado" "1" "$attached_c"
 
 sessions_named_like_ours="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c "^omasession-test-" || true)"
-check "nenhuma sessão órfã extra foi criada (só as 2 nossas)" "2" "$sessions_named_like_ours"
+check "nenhuma sessão órfã extra foi criada (só as 3 nossas)" "3" "$sessions_named_like_ours"
 
 printf '\n%d ok, %d falha(s)\n' "$pass" "$fail"
 exit $(( fail > 0 ))

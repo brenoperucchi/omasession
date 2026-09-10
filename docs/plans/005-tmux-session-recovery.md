@@ -200,6 +200,83 @@ painel ativo em vez de "not recoverable"; a migração generalizada testada
 com um snapshot nomeado criado só no diretório legado. Ver o diff de
 `omasession-5` em `.herdr/review/`.
 
+## Terceira rodada (omasession-6) — a correção da rodada 5 quebrou de novo, e o padrão parou
+
+Ainda não foi APPROVE: a nova regra "ache o `tmux` pelo `basename`" da rodada
+5 tinha exatamente o furo que ela deveria evitar, achado pelos dois
+revisores com o MESMO contra-exemplo, independente um do outro:
+
+- **P2, os dois bateram:** `foot --app-id=X --title tmux -- tmux attach -t
+  work` tem o token `tmux` DUAS vezes -- uma como valor de `--title`, outra
+  como o comando de verdade depois do `--`. A busca cega pelo primeiro
+  `basename == "tmux"` cortava no valor da opção, jogando fora o `--` e o
+  `tmux` reais (`foot --app-id=X --title tmux new -A -s work` -- o `foot`
+  tenta abrir um binário chamado `new`). `--title`/`--class tmux` não é
+  exótico: é o jeito mais óbvio de rotular uma janela que roda tmux, e
+  `--class` é justamente o mecanismo que produz a classe custom que esta
+  correção existe para cobrir. Corrigido com uma fronteira explícita
+  (`child_command_start()`): se há `--`, o comando filho começa logo depois
+  dele, ponto -- nada antes conta. Sem `--`, o primeiro token que não é uma
+  flag e cujo antecessor não é uma flag capaz de consumi-lo como valor
+  (`--app-id=X`, autocontido por `=`, não consome; uma flag hipotética sem
+  `=` consumiria). Só faz sentido perguntar "esse comando já é tmux?" na
+  posição que essa fronteira aponta, nunca em qualquer token anterior.
+- **P2, os dois bateram de novo:** o fallback `env FOO=1 kitty` da rodada 5
+  não pulava o `env` -- pulava só tokens com `=`, e o primeiro token
+  (`env`) não tem `=` nenhum, então o laço parava nele mesmo e devolvia
+  `resolved_bin = "env"`. O caso que a correção dizia cobrir continuava
+  pulando o bloco inteiro, com zero chamadas a `child_cwd`/`tmux_session` --
+  medido pelos dois, um deles contra o `.desktop` real que motivou o achado
+  originalmente (`Exec=env -u http_proxy ... zapzap`). Corrigido com
+  `skip_env_wrapper()`: reconhece `env` como primeiro token e avança por
+  cima dele e das flags que ele mesmo aceita (`-u NOME`/`-C DIR` consomem o
+  próximo token; `CHAVE=VALOR` também) antes de olhar o binário.
+- **P2 (um revisor):** o `cwd` continuava sendo inserido no FIM do argv, não
+  antes do comando filho -- `foot --app-id=X -- bash` virava `foot
+  --app-id=X -- bash --working-directory=Y`, entregando o flag pro `bash`.
+  Corrigido inserindo na posição que a MESMA fronteira (`child_command_start`)
+  aponta -- antes do `--`, quando existe, nunca depois dele.
+- **P2 (um revisor), fora deste mecanismo:** a migração ainda tinha duas
+  janelas abertas -- a checagem de "já existe" rodava ANTES do lock (um save
+  do mesmo nome podia publicar bem no meio, e a migração sobrescrevia com a
+  versão legada), e "existe o toml" continuava contando como "migração
+  completa" mesmo com o rename do sidecar ainda por fazer (uma interrupção
+  exatamente ali nunca se corrigia numa tentativa seguinte). Corrigido com
+  uma função de completude (`_legacy_migration_complete`, toml + sidecar
+  quando a origem tem um) checada duas vezes -- antes e depois de adquirir o
+  lock -- e uma migração incompleta agora se completa numa tentativa
+  seguinte em vez de ficar presa. Achado à parte, mesmo revisor: uma sessão
+  legada só com `.toml` (salva pelo hyprresume puro, antes do sidecar
+  existir) era pulada em silêncio; agora migra sozinha, com um aviso.
+- **P3 (um revisor):** `capture.py` ainda quebrava com stdin não-vazio e não
+  é JSON válido (`echo nope | capture.py`). `session-save.sh` é o único que
+  encana algo hoje, e sempre JSON válido, então isto não morde -- mas
+  tratado (`try/except` cai pra buscar fresco) para não ser o próximo furo
+  que uma rodada futura encontra.
+
+O ramo que regrediu duas vezes (rodadas 5 e 6) nunca tinha teste automatizado
+tocando nele -- os seis casos de `test/tmux-cases.sh` até aqui passavam todos
+por `.desktop` puro (`foot`, sem `--`, sem programa filho pré-existente). Os
+dois revisores apontaram isso como o achado que mais importa: sem um teste
+que exercite "classe custom com cmdline já apontando pro tmux", a revisão
+continua sendo a única coisa que pega esta classe de regressão, rodada após
+rodada. `test/tmux-cases.sh` ganhou uma terceira sessão (`SESS_C`) exatamente
+nesse formato -- `foot --app-id=<nome> -- tmux attach -t <nome>` -- cobrindo
+`resolve`, `cwd` e o ciclo completo de restore.
+
+Medido depois da correção: `test/tmux-cases.sh` 9/9 (as 6 anteriores mais as
+3 da sessão C); `test/guard-cases.sh` 25/25; migração testada à mão com uma
+sessão só-toml e com um par deliberadamente pela metade (toml já migrado,
+sidecar não) -- completou sozinha na tentativa seguinte.
+
+Nota para quem estender `replay.py` no futuro: a inserção de `cwd` lá ainda
+assume um `--` literal na string do comando (`cmd.partition(" -- ")`). Não é
+bug hoje -- `replay.py` só insere esse flag para classes em
+`TERMINAL_CWD_FLAG`, e uma classe custom nunca chega lá -- mas o dia em que
+o replay ganhar o mesmo fallback por binário que `resolve.py` já tem, essa
+suposição para de valer para o formato sem `--` que este mecanismo agora
+produz de propósito.
+
 ## O que continua sendo do usuário, não deste plugin
 
 - Conteúdo dos panes, quantos existiam, o que rodava em cada um: isso é

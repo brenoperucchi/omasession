@@ -124,6 +124,15 @@ if __name__ == "__main__":
     # fresh. Reading whatever is actually there and only trusting it if it
     # parses covers both the piped case and the closed/empty one; standalone
     # manual runs (`python3 capture.py name`) still fetch fresh either way.
+    #
+    # Non-empty but not valid JSON is the last way this can fail: found in
+    # review, round 6 -- `echo nope | capture.py` still raised. Only
+    # session-save.sh pipes anything in today, and always valid JSON, so this
+    # cannot fire yet -- falling back instead of trusting garbage is what
+    # keeps it that way if that ever stops being true.
     piped = sys.stdin.read().strip() if not sys.stdin.isatty() else ""
-    piped_clients = json.loads(piped) if piped else None
+    try:
+        piped_clients = json.loads(piped) if piped else None
+    except json.JSONDecodeError:
+        piped_clients = None
     sys.stdout.write(capture(name, clients=piped_clients))
