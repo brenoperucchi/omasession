@@ -1,7 +1,40 @@
 # 003 — O resolvedor de comando: apps arbitrários sem configuração
 
 **Status:** resolvedor escrito e medido (`lib/resolve.py`, `omasession resolve`).
-Falta trocar a captura do hyprresume pela nossa — o passo 3 abaixo.
+Falta trocar a captura do hyprresume pela nossa — o passo 3 abaixo. Deixou de
+ser melhoria teórica em 2026-09-09: um caso real de uso quebrou por causa
+exatamente disso — ver "Evidência que fecha a decisão" abaixo.
+
+## Evidência que fecha a decisão (2026-09-09)
+
+Cenário real, não sintético: o Herdr (terminal-workspace-manager do usuário,
+cliente-servidor) roda sua TUI como `foot --app-id=TUI.tile herdr` — uma classe
+custom, sem `.desktop`, com argumentos que definem qual aplicação abre dentro
+do terminal. Testado no lab com reboot real:
+
+- `herdr.service` (o servidor) **sobreviveu ao reboot sozinho**, ancorado em
+  `default.target` como o nosso timer — nenhuma dependência do OmaSession.
+- A janela cliente **não voltou funcional**: reapareceu como um `foot` genérico
+  sem o `herdr` rodando dentro, e duplicada (2 janelas em vez de 1).
+
+Causa isolada e reproduzível com um comando, fora de qualquer código nosso:
+
+    $ hyprresume resolve TUI.tile
+    TUI.tile → foot
+
+O hyprresume resolve a classe pelo binário real do processo (`/proc/<pid>/exe`
+→ `/usr/bin/foot`), descartando os argumentos de linha de comando. `omasession
+resolve` — que usa `/proc/<pid>/cmdline`, não `/proc/<pid>/exe` — resolveu essa
+mesma janela corretamente (`foot --app-id=TUI.tile herdr`) antes do reboot. Mas
+o `replay.py` restaura pelo `launch_cmd` que vem do `hyprresume save`, não pelo
+resultado de `omasession resolve`: o resolvedor certo já existe e já foi
+medido, só não está no caminho que o restore realmente usa.
+
+A duplicação da janela não foi investigada a fundo — pode ser um efeito
+colateral do mesmo mecanismo de captura do hyprresume, ou algo específico de
+como o `herdr` interage com o terminal. Não vale investigar isso separadamente:
+troca-se a captura, o problema desaparece com ela ou vira um caso a medir de
+novo depois, num resolvedor cujo comportamento a gente entende.
 
 ## Por que agora
 
