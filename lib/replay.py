@@ -278,12 +278,29 @@ def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
     return True
 
 
+def is_blank_tab(title: str) -> bool:
+    """A browser's own placeholder window, not anything that was ever saved.
+
+    Measured on a real reboot: Chromium sometimes opens this window before its
+    session-restore windows have appeared, as a distinct, separately-timed
+    window rather than a tab inside one of them. No saved page is ever titled
+    exactly this, so matching on it here cannot mistake real content for noise.
+    """
+    return strip_suffix(title) == "New Tab"
+
+
 def wait_for_browser(app: str, known: set[str], want: int) -> list[dict]:
     """Windows of `app` that appeared, waiting only as long as it takes.
 
-    Returns as soon as `want` windows are up, or once the count has stopped
-    changing for BROWSER_QUIET seconds -- the browser reopens its windows in a
-    burst, so a quiet gap means it is done, however many it managed.
+    Returns as soon as `want` *real* windows are up, or once the count has
+    stopped changing for BROWSER_QUIET seconds -- the browser reopens its
+    windows in a burst, so a quiet gap means it is done, however many it
+    managed. A blank placeholder window does not count toward `want`: measured
+    2026-09-10, it can appear before the actual saved windows do, and counting
+    it let this return before a real, still-loading window ever showed up --
+    that window then appeared after this function had already moved on,
+    unclaimed and unplaced, while the blank window went on to steal its slot
+    below.
     """
     deadline = time.monotonic() + BROWSER_TIMEOUT
     found: list[dict] = []
@@ -294,7 +311,8 @@ def wait_for_browser(app: str, known: set[str], want: int) -> list[dict]:
         if len(current) != len(found):
             found = current
             last_change = time.monotonic()
-        if len(found) >= want:
+        real = [w for w in found if not is_blank_tab(w.get("title", ""))]
+        if len(real) >= want:
             return found
         if found and time.monotonic() - last_change >= BROWSER_QUIET:
             return found
@@ -510,7 +528,18 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
     # be the session we saved: it can hand back more windows than we asked for
     # (stale profile state) or fewer. Park the extras on the workspaces we
     # still expected to fill, so nothing piles up on the active one.
+    #
+    # A blank placeholder window is never one of those legitimate extras -- it
+    # holds no content, saved or not, so filling a slot with it would silently
+    # swap a real (just slower to appear) page for an empty one. Close it
+    # instead and leave the slot for the "open ourselves" fallback below,
+    # which at least lands the eventual replacement on the right workspace.
     for win in leftovers:
+        if is_blank_tab(win.get("title", "")):
+            dispatch("window.close", window=f"address:{win['address']}")
+            print(f"  x closed a blank window {app} opened before its own "
+                  f"restore caught up")
+            continue
         if wanted:
             target = wanted.pop(0)
             move_to(win["address"], target["workspace"])
