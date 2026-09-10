@@ -309,10 +309,11 @@ def child_cwd(pid: int) -> tuple[str | None, str]:
 def tmux_session(pid: int) -> tuple[str | None, str | None, str]:
     """The tmux session a terminal's own client is attached to, or (None, None, why).
 
-    Returns (session_name, session_path, why). session_path is tmux's own
-    record of the session's cwd -- a bonus, not the point: the reattach itself
-    is what matters, this just lets the panel say a real directory instead of
-    "not recoverable" for a window that is, in fact, going to recover it.
+    Returns (session_name, pane_cwd, why). pane_cwd is tmux's own record of
+    the attached client's active pane -- a bonus, not the point: the reattach
+    itself is what matters, this just lets the panel say a real directory
+    instead of "not recoverable" for a window that is, in fact, going to
+    recover it.
 
     Measured 2026-09-10 (docs/plans/005): a terminal window whose content lives
     in a tmux client resolves today via .desktop/cmdline same as any other
@@ -349,9 +350,16 @@ def tmux_session(pid: int) -> tuple[str | None, str | None, str]:
                             f"cannot tell which one is this window")
 
     try:
+        # Tab, não espaço: tmux aceita espaço em nome de sessão (medido na
+        # revisão desta rodada -- "Contratos Thera" é um nome real em uso
+        # neste projeto), e um separador que o valor pode conter corrompe
+        # tanto o nome quanto o cwd em silêncio. `#{pane_current_path}` em vez
+        # de `#{session_path}`: o segundo é o diretório de LANÇAMENTO da
+        # sessão, não o do painel ativo -- duas sessões reais aqui mostravam
+        # `~` enquanto o painel ativo estava noutro lugar.
         out = subprocess.run(
             ["tmux", "list-clients", "-F",
-             "#{client_pid} #{session_name} #{session_path}"],
+             "#{client_pid}\t#{session_name}\t#{pane_current_path}"],
             capture_output=True, text=True, timeout=3)
     except (OSError, subprocess.TimeoutExpired):
         return None, None, "tmux not reachable"
@@ -360,8 +368,8 @@ def tmux_session(pid: int) -> tuple[str | None, str | None, str]:
 
     target = clients[0]
     for line in out.stdout.splitlines():
-        client_pid, _, rest = line.partition(" ")
-        name, _, path = rest.partition(" ")
+        client_pid, _, rest = line.partition("\t")
+        name, _, path = rest.partition("\t")
         if client_pid == target:
             return name, (path or None), f"tmux client {target}"
     return None, None, "tmux client not listed by list-clients (already detached?)"
@@ -413,15 +421,26 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
             result["via"] = "cmdline"
             result["note"] = "last resort; may not carry the app's own state"
 
-    if klass in TERMINAL_CWD_FLAG and pid:
+    # A classe do Hyprland é do window manager, não do binário -- uma janela
+    # com --app-id/--class custom (o próprio caso que motivou este projeto:
+    # `foot --app-id=TUI.tile herdr`) tem klass="TUI.tile", que não bate com
+    # nenhuma das duas tabelas abaixo mesmo sendo, de fato, um foot. Medido na
+    # revisão desta rodada: sem checar também o binário já resolvido, esse
+    # caso pula o bloco inteiro -- cwd e tmux ficam sem tentar, exatamente a
+    # janela que este mecanismo existe para cobrir.
+    resolved_bin = Path(result["argv"][0]).name if result["argv"] else None
+    wants_cwd_flag = klass in TERMINAL_CWD_FLAG
+    wants_tmux = klass in TRAILING_ARGV_TERMINALS or resolved_bin in TRAILING_ARGV_TERMINALS
+
+    if (wants_cwd_flag or wants_tmux) and pid:
         cwd, why = child_cwd(pid)
         result["cwd_note"] = why
-        if cwd:
+        if cwd and wants_cwd_flag:
             result["cwd"] = cwd
             flag = TERMINAL_CWD_FLAG[klass]
             if result["argv"] and not any(a.startswith(flag) for a in result["argv"]):
                 result["argv"] = result["argv"] + [f"{flag}={cwd}"]
-        elif klass in TRAILING_ARGV_TERMINALS:
+        elif not cwd and wants_tmux:
             # child_cwd() found no shell of its own -- the usual reason is a
             # tmux client sitting where the shell should be. Reattaching to
             # its session is a better answer than the cwd we cannot get: the
@@ -429,13 +448,21 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
             # shell in $HOME, and tmux answers its own pane's cwd from there.
             session, session_path, tmux_why = tmux_session(pid)
             result["tmux_note"] = tmux_why
-            if session and result["argv"]:
+            # Só acrescenta se o argv resolvido ainda não tiver um comando
+            # filho próprio (um `--` já presente, vindo de um .desktop
+            # customizado ou do fallback de cmdline): sem isto, um
+            # `foot -- tmux attach -t work` vira
+            # `foot -- tmux attach -t work -- tmux new -A -s work` --
+            # o comando filho continua sendo o `tmux attach` antigo, os
+            # argumentos novos vão pra ELE, não pro terminal. Achado da
+            # revisão desta rodada.
+            if session and result["argv"] and "--" not in result["argv"]:
                 result["tmux_session"] = session
                 result["argv"] = result["argv"] + ["--", "tmux", "new", "-A", "-s", session]
                 if session_path:
-                    # A cwd for the panel and a fallback if the reattach itself
-                    # ever fails -- replay.py already knows to insert this
-                    # before the `--`, exactly the case its own comment names.
+                    # A cwd para o painel e uma queda-de-pau se o reattach em
+                    # si falhar -- replay.py já sabe inserir isto antes de um
+                    # `--`, exatamente o caso que seu próprio comentário cita.
                     result["cwd"] = session_path
 
     return result

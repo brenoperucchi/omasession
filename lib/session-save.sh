@@ -136,12 +136,33 @@ trap cleanup EXIT
 # que é literalmente "bash", não o nome do arquivo). `/proc/<pid>/cmdline`
 # carrega o caminho completo do script como segundo argumento e é o que de fato
 # distingue esta execução de qualquer outra coisa que tenha herdado o PID.
+# O padrão cobre tanto o par publicável (.toml/.titles.json) quanto os
+# arquivos que só existem enquanto a captura está em andamento
+# (.toml.raw/.titles.json.raw, escritos antes do rename para o nome final).
+# Achado da revisão: um SIGKILL bem no meio da captura (linhas abaixo) deixava
+# justamente esse tipo pra trás, e o padrão antigo -- só toml/titles.json --
+# nunca casava com ele, então acumulava para sempre exatamente como a
+# varredura existe para impedir.
 for stale in "$SESSION_DIR"/omasession.staging.*; do
     [[ -e "$stale" ]] || continue
-    [[ "$stale" =~ \.([0-9]+)\.(toml|titles\.json)$ ]] || continue
+    [[ "$stale" =~ \.([0-9]+)\.(toml|toml\.raw|titles\.json|titles\.json\.raw)$ ]] || continue
     pid="${BASH_REMATCH[1]}"
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || echo "")"
     [[ "$cmdline" == *session-save.sh* ]] || rm -f "$stale"
+done
+
+# O stderr temporário do capture.py (.$NAME.capture-err.XXXXXX) não carrega
+# pid nenhum no nome -- mktemp usa um sufixo aleatório, não o processo -- então
+# a mesma checagem de /proc não se aplica. Mas por construção nenhuma execução
+# em andamento pode estar usando um que já existia ANTES desta varredura: a
+# variável só é populada mais abaixo, com um mktemp novo. Um que sobrevive até
+# aqui é órfão de um SIGKILL de outra execução (própria ou de outro NAME) que
+# não rodou o trap; a idade mínima é só para não correr atrás de um que outra
+# execução concorrente, de outro NAME, tenha criado no mesmíssimo instante.
+for stale in "$SESSION_DIR"/.*.capture-err.*; do
+    [[ -e "$stale" ]] || continue
+    [[ -n "$(find "$stale" -mmin +1 2>/dev/null)" ]] || continue
+    rm -f "$stale"
 done
 
 count_old="$(toml_windows "$TOML")"
@@ -157,7 +178,16 @@ SELF_DIR="$(dirname "${BASH_SOURCE[0]}")"
 CAPTURE="${OMASESSION_CAPTURE:-$SELF_DIR/capture.py}"
 rm -f "$STAGING_TOML"
 capture_err="$(mktemp "$SESSION_DIR/.$NAME.capture-err.XXXXXX")"
-if ! python3 "$CAPTURE" "$NAME" > "$STAGING_TOML.raw" 2>"$capture_err"; then
+# $clients por stdin, não uma segunda hyprctl dentro do capture.py: achado da
+# revisão desta rodada. "O sidecar sai da MESMA leitura que decidiu o guard"
+# (comentário mais abaixo) era garantido de graça enquanto o toml vinha de um
+# binário externo que este script nunca invocava com os dados já em mão. Ler
+# de novo por conta própria -- o que capture.py fazia antes desta correção --
+# reabre exatamente a corrida que o comentário descreve: uma janela fechando
+# ou abrindo entre as duas leituras faz count_new (desta leitura) e
+# count_screen (da leitura de cima) discordarem por um motivo que não é nem
+# save incompleto nem sessão vazia.
+if ! python3 "$CAPTURE" "$NAME" <<<"$clients" > "$STAGING_TOML.raw" 2>"$capture_err"; then
     err "capture failed: $(tail -3 "$capture_err")"
     rm -f "$capture_err" "$STAGING_TOML.raw"
     exit 3
@@ -165,7 +195,24 @@ fi
 rm -f "$capture_err"
 mv -f "$STAGING_TOML.raw" "$STAGING_TOML"
 
-count_new="$(toml_windows "$STAGING_TOML")"
+# Não a contagem de [[window]] crua: uma janela cujo resolvedor devolveu
+# argv=None ainda vira um registro (app_id/workspace/geometria, sem
+# launch_cmd) -- válido para o parser, inútil para o replay, que pula esse
+# registro no restore (replay.py: "no launch_cmd, skipped"). Achado da
+# revisão: contando o registro mesmo assim, o piso e a cobertura viam uma
+# tela cheia como coberta quando na verdade uma janela não tinha comando
+# nenhum pra voltar -- o guard existe exatamente pra recusar isto, e a
+# contagem crua o deixava cego pra esse caso específico.
+toml_resolved_windows() {
+    [[ -f "$1" ]] || { echo 0; return; }
+    python3 - "$1" <<'PY' 2>/dev/null || echo -1
+import sys, tomllib
+with open(sys.argv[1], "rb") as fh:
+    print(sum(1 for w in tomllib.load(fh).get("window", []) if w.get("launch_cmd")))
+PY
+}
+
+count_new="$(toml_resolved_windows "$STAGING_TOML")"
 
 # As duas regras. Cobrem acidentes diferentes e nenhuma implica a outra.
 #

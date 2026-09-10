@@ -69,7 +69,13 @@ close_all() {
 }
 
 DIR_A="$(mktemp -d)"; DIR_B="$(mktemp -d)"
-SESS_A="omasession-test-a-$$"; SESS_B="omasession-test-b-$$"
+SESS_A="omasession-test-a-$$"
+# Com espaço, de propósito: tmux aceita espaço em nome de sessão (a própria
+# mesh do usuário tem um, "Contratos Thera"), e a revisão desta rodada achou
+# que o parsing de tmux_session() usava espaço como separador -- corrompendo
+# nome e cwd em silêncio para exatamente este caso. Sem este caso o teste não
+# distingue o parsing certo do errado.
+SESS_B="omasession-test-b $$"
 
 cleanup() {
     tmux kill-session -t "$SESS_A" 2>/dev/null || true
@@ -84,16 +90,19 @@ close_all
 tmux new -d -s "$SESS_A" -c "$DIR_A"
 tmux new -d -s "$SESS_B" -c "$DIR_B"
 sleep 1
-hyprctl repl "hl.dispatch(hl.dsp.exec_cmd(\"foot -- tmux attach -t $SESS_A\"))" >/dev/null
+hyprctl repl "hl.dispatch(hl.dsp.exec_cmd(\"foot -- tmux attach -t '$SESS_A'\"))" >/dev/null
 sleep 3
-hyprctl repl "hl.dispatch(hl.dsp.exec_cmd(\"foot -- tmux attach -t $SESS_B\"))" >/dev/null
+hyprctl repl "hl.dispatch(hl.dsp.exec_cmd(\"foot -- tmux attach -t '$SESS_B'\"))" >/dev/null
 sleep 3
 
 resolved="$("$OMASESSION" resolve --json)"
 cmd_a="$(jq -r --arg d "$SESS_A" '.[] | select(.tmux_session == $d) | .command' <<<"$resolved")"
 cmd_b="$(jq -r --arg d "$SESS_B" '.[] | select(.tmux_session == $d) | .command' <<<"$resolved")"
 check "sessão A resolve pra 'tmux new -A -s'"  "foot -- tmux new -A -s $SESS_A" "$cmd_a"
-check "sessão B resolve pra 'tmux new -A -s'"  "foot -- tmux new -A -s $SESS_B" "$cmd_b"
+# command() passa o argv por shlex.quote -- um nome com espaço sai entre
+# aspas simples (`'omasession test b 12345'`), não solto. O valor esperado
+# tem de refletir isso, não só concatenar o nome cru.
+check "sessão B (nome com espaço) resolve pra 'tmux new -A -s', sem truncar"  "foot -- tmux new -A -s '$SESS_B'" "$cmd_b"
 
 cwd_a="$(jq -r --arg d "$SESS_A" '.[] | select(.tmux_session == $d) | .cwd' <<<"$resolved")"
 check "cwd da sessão A vem do tmux, não 'not recoverable'" "$DIR_A" "$cwd_a"

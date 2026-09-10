@@ -335,6 +335,23 @@ autostart_line() { printf 'o.launch_on_start("%s/bin/omasession restore --if-ena
 # usuário acrescenta um app, uninstall, e o app dele some.
 MARK_LOGIN="-- OmaSession: reopen the last session at login"
 
+# Marcador de uma versão anterior deste script (antes de 13bcaca), que
+# desarmava o autostart do hyprresume no install porque os dois escreviam os
+# mesmos arquivos. Não competimos mais -- capturamos por conta própria, em
+# diretório separado -- então o install de hoje não desarma nada. Mas quem
+# instalou aquela versão tem essa linha comentada no autostart.lua até hoje, e
+# sem desfazê-la aqui o uninstall nunca a alcança: achado da revisão, "uninstall
+# anuncia sucesso e a alteração legada fica pra trás".
+LEGACY_MARK_DISARM="-- omasession: disarmed, see docs/DESIGN.md §2 -- "
+
+rearm_legacy_hyprresume() {
+    [[ -f "$AUTOSTART" ]] || return 0
+    grep -qF -- "$LEGACY_MARK_DISARM" "$AUTOSTART" || return 0
+    local tmp; tmp="$(mktemp "$AUTOSTART.XXXXXX")"
+    sed "s|^${LEGACY_MARK_DISARM}||" "$AUTOSTART" > "$tmp" && mv -f "$tmp" "$AUTOSTART"
+    say "hyprresume re-armed in autostart.lua (leftover from an older install)"
+}
+
 backup_autostart() {
     [[ -f "$AUTOSTART" ]] || return 0
     # Preservado para recuperação manual, nunca aplicado automaticamente.
@@ -375,11 +392,32 @@ remove_login_restore() {
     fi
 }
 
+# O diretório fixo de antes de 13bcaca -- não o $SESSION_DIR de hoje, que
+# pode até ser o mesmo se OMASESSION_SESSION_DIR estiver setado pra lá, mas o
+# caminho onde sessões de uma instalação anterior objetivamente estariam é
+# sempre este, independente de qualquer override atual.
+LEGACY_SESSION_DIR="$HOME/.local/share/hyprresume/sessions"
+
+migrate_legacy_session() {
+    # Só se o novo diretório ainda não tem nada: nunca sobrescreve uma sessão
+    # que o novo capturador já salvou. Achado da revisão: sem isto, quem
+    # atualiza e reinicia antes do primeiro save novo perde a última sessão
+    # boa que tinha -- o restore de login pode cair nesse intervalo.
+    [[ -f "$SESSION_DIR/last.toml" ]] && return 0
+    [[ -f "$LEGACY_SESSION_DIR/last.toml" ]] || return 0
+    local f
+    for f in last.toml last.titles.json last.prev.toml last.prev.titles.json; do
+        [[ -f "$LEGACY_SESSION_DIR/$f" ]] && cp -p "$LEGACY_SESSION_DIR/$f" "$SESSION_DIR/$f"
+    done
+    say "migrated last saved session from $LEGACY_SESSION_DIR (hyprresume's old directory, left untouched there)"
+}
+
 cmd_install() {
     command -v jq >/dev/null || die "jq is required"
     command -v python3 >/dev/null || die "python3 is required"
 
     mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$SESSION_DIR"
+    migrate_legacy_session
     if [[ ! -f "$CONFIG" ]]; then
         jq -n --argjson i "$DEFAULT_SAVE_INTERVAL" \
               --argjson r "$DEFAULT_RESTORE_ON_LOGIN" \
@@ -418,6 +456,7 @@ cmd_uninstall() {
     # Desfaz só o que instalamos. Restaurar o backup inteiro descartaria tudo
     # que o usuário editou depois do install -- P0 da rodada 2.
     remove_login_restore
+    rearm_legacy_hyprresume
     if [[ -f "$AUTOSTART.omasession.bak" ]]; then
         say "backup kept at $(basename "$AUTOSTART").omasession.bak (not applied)"
     fi

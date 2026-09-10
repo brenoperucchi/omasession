@@ -72,8 +72,9 @@ def window_toml(fields: dict) -> str:
     return "\n".join(lines)
 
 
-def capture(name: str = "last") -> str:
-    clients = hyprctl_json("clients")
+def capture(name: str = "last", clients: object | None = None) -> str:
+    if clients is None:
+        clients = hyprctl_json("clients")
     monitors = hyprctl_json("monitors")
     index = R.desktop_index()
 
@@ -82,7 +83,7 @@ def capture(name: str = "last") -> str:
         if c.get("mapped") and c.get("workspace", {}).get("id", 0) > 0
     ]
 
-    doc = [f'[session]\nname = "{name}"\ntimestamp = {int(time.time())}\n']
+    doc = [f'[session]\nname = {toml_str(name)}\ntimestamp = {int(time.time())}\n']
 
     for c in windows:
         klass = c.get("class", "")
@@ -107,4 +108,14 @@ def capture(name: str = "last") -> str:
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else "last"
-    sys.stdout.write(capture(name))
+    # session-save.sh reads `hyprctl clients` once, to decide the guard, and
+    # pipes that exact reading in here -- otherwise this does its own second
+    # read at a different instant, and the guard ends up comparing two
+    # different screens (window opened/closed between the two reads) instead
+    # of the one it was built to protect. Found in review, round 4: nothing
+    # broke visibly, the invariant the comment above the guard already
+    # describes just stopped being true the moment the reader became us
+    # instead of hyprresume. A tty means nobody piped anything in -- standalone
+    # manual runs (`python3 capture.py name`) still work, reading it fresh.
+    piped_clients = None if sys.stdin.isatty() else json.load(sys.stdin)
+    sys.stdout.write(capture(name, clients=piped_clients))
