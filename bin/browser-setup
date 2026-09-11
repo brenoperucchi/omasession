@@ -38,7 +38,50 @@ declare -A BINARIES=(
 
 die() { printf 'browser-setup: %s\n' "$*" >&2; exit 1; }
 
-(( EUID == 0 )) || die "needs root to write policy files (run with sudo)"
+# Validate before dispatching anything, --list-paths included -- found by
+# review (omasession-8): an earlier version let --list-paths exit before this
+# case ran, so it worked by accident of ordering rather than by being a
+# recognized option. Moving the case's own validated branch up here (rather
+# than the case up past --list-paths) keeps --list-paths root-free, which
+# omasession install/uninstall both depend on. A rejected, unrecognized
+# argument used to fall through to the install loop below -- found by review
+# (omasession-7): a typo on --remove (e.g. --remvoe) silently WROTE the
+# machine-wide policy instead of refusing, the opposite of what someone typing
+# a removal flag wants, with no error to notice it by.
+case "${1:-}" in
+    ""|--install|--remove) ;;
+    --list-paths)
+        for vendor in "${!POLICY_DIRS[@]}"; do
+            printf '%s/omasession-no-promo.json\n' "${POLICY_DIRS[$vendor]}"
+        done
+        exit 0
+        ;;
+    *) die "unknown option: ${1} (use --remove, --list-paths, or no argument to install)" ;;
+esac
+
+(( EUID == 0 )) || die "needs root to change policy files (run with sudo)"
+
+# --remove undoes exactly what installing wrote, machine-wide: the policy has
+# no per-machine record of which vendors THIS script configured, so remove
+# checks every directory the install loop knows about, not just the ones with
+# a browser installed right now -- a browser removed since install would
+# otherwise leave its policy file behind forever, unreachable by either path.
+if [[ "${1:-}" == "--remove" ]]; then
+    removed=0
+    for vendor in "${!POLICY_DIRS[@]}"; do
+        file="${POLICY_DIRS[$vendor]}/omasession-no-promo.json"
+        [[ -f "$file" ]] || continue
+        rm -f "$file"
+        printf 'browser-setup: removed %s\n' "$file"
+        removed=$((removed + 1))
+    done
+    if (( removed == 0 )); then
+        echo "browser-setup: no policy files present; nothing to remove"
+    else
+        echo "browser-setup: $removed policy file(s) removed"
+    fi
+    exit 0
+fi
 
 installed=0
 for vendor in "${!POLICY_DIRS[@]}"; do

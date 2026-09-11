@@ -523,8 +523,22 @@ cmd_install() {
     # escreve e que `restore --if-enabled` consulta no login.
     add_login_restore
 
-    if [[ ! -f /etc/chromium/policies/managed/omasession-no-promo.json \
-       && ! -f /etc/opt/chrome/policies/managed/omasession-no-promo.json ]]; then
+    # browser-setup --list-paths is the one place that knows all five vendor
+    # directories -- found by review (omasession-7): this check used to hardcode
+    # just 2 of them, so a Brave/Vivaldi/Edge-only machine that HAD run
+    # browser-setup still got told it hadn't. `listed` is separate from
+    # `policy_seen` -- found by review (omasession-8): a broken/missing
+    # browser-setup makes the loop read zero lines, which used to look
+    # identical to "checked, found nothing" and stayed silent instead of
+    # flagging that the check itself failed.
+    local policy_seen=0 listed=0 pf
+    while IFS= read -r pf; do
+        listed=1
+        [[ -f "$pf" ]] && policy_seen=1
+    done < <("$SELF/bin/browser-setup" --list-paths)
+    if (( ! listed )); then
+        err "could not check browser policy (browser-setup --list-paths failed) -- run: sudo $SELF/bin/browser-setup"
+    elif (( ! policy_seen )); then
         err "browser policy not installed -- run: sudo $SELF/bin/browser-setup"
     fi
     # Silencioso até a rodada 5: quem atualizou de uma versão que desarmava o
@@ -547,6 +561,26 @@ cmd_uninstall() {
     rearm_legacy_hyprresume
     if [[ -f "$AUTOSTART.omasession.bak" ]]; then
         say "backup kept at $(basename "$AUTOSTART").omasession.bak (not applied)"
+    fi
+    # browser-setup escreve política root, fora de qualquer diretório que
+    # este comando (sem sudo) tem permissão de tocar -- só detectar e apontar
+    # o caminho de volta, nunca tentar escalar privilégio sozinho aqui. A lista
+    # de diretórios vem de browser-setup --list-paths, não de uma segunda cópia
+    # aqui -- achado da revisão (omasession-7): duas cópias já tinham divergido
+    # (esta tinha 5, o check do install acima só conhecia 2). `listed` separado
+    # de `found` -- achado da revisão (omasession-8): um browser-setup quebrado
+    # ou ausente fazia o loop ler zero linhas, indistinguível de "chequei e não
+    # tem nada", deixando o aviso desligado bem no caminho que ele existe pra
+    # cobrir.
+    local found=0 listed=0 f
+    while IFS= read -r f; do
+        listed=1
+        [[ -f "$f" ]] && found=$((found + 1))
+    done < <("$SELF/bin/browser-setup" --list-paths)
+    if (( ! listed )); then
+        say "note: could not check for a leftover browser policy (browser-setup --list-paths failed) -- check /etc/*/policies/managed/omasession-no-promo.json by hand"
+    elif (( found > 0 )); then
+        say "note: $found browser-wide restore policy file(s) from browser-setup are still active system-wide -- to remove them: sudo $SELF/bin/browser-setup --remove"
     fi
     say "uninstalled -- saved sessions in $SESSION_DIR were left alone"
 }
