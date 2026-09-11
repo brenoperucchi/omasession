@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Resolve a mapped window back to a command that reopens it.
 
-This is the piece the whitelist approach cannot reach. `dimef.omaresume` keys
-its launcher off eight known classes and returns nothing for anything else;
+This is the piece the whitelist approach cannot reach. A launcher keyed off a
+fixed list of known classes returns nothing for anything outside it;
 hyprresume does resolve arbitrary apps, but it has been unmaintained since March
 2026 and is the last dependency this plugin has. Owning the resolver is the same
 work as removing that dependency (docs/plans/003).

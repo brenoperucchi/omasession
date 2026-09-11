@@ -40,8 +40,8 @@ novo depois, num resolvedor cujo comportamento a gente entende.
 
 ## Por que agora
 
-`dimef.omaresume` (marketplace, 08/09/2026) restaura sessão no Omarchy 4
-falando a mesma API Lua. A premissa de abertura deste projeto — *"nenhuma
+Outro plugin da mesma categoria (marketplace, 08/09/2026) restaura sessão
+no Omarchy 4 falando a mesma API Lua. A premissa de abertura deste projeto — *"nenhuma
 ferramenta fala a API que o compositor aceita"* — deixou de distinguir.
 
 O que ainda distingue está no `launch_spec` dele:
@@ -91,7 +91,7 @@ cenário que cubra os quatro caminhos acima:
 | classe | caminho esperado | por que está na lista |
 |---|---|---|
 | `foot` | desktop + cwd do filho | terminal, o caso com cwd |
-| `org.gnome.Nautilus` | `.desktop` | o `omaresume` não cobre |
+| `org.gnome.Nautilus` | `.desktop` | fora da lista fixa de outra abordagem |
 | `md.obsidian.Obsidian` | `.desktop` (AppImage/Electron) | `cmdline` engana |
 | `chromium` | `.desktop`, sessão pelo browser | PID e cmdline compartilhados |
 | um Flatpak qualquer | cgroup | `cmdline` mostra `bwrap` |
@@ -110,8 +110,8 @@ No guest, fechando tudo e relançando **apenas** pelo comando resolvido:
 | `md.obsidian.Obsidian` | `.desktop` | sim |
 | `chromium` | `.desktop` | sim |
 
-**4/4.** As duas do meio são exatamente as que o `launch_spec` do `omaresume`
-devolveria como `None`.
+**4/4.** As duas do meio são exatamente as que a lista fixa de outra
+abordagem devolveria como `None`.
 
 No host, contra uma sessão real de 19 janelas: 19/19 resolvidas, incluindo
 `qemu` e dois `kitty` com `--class` próprio, ambos por `cmdline` — que é o
@@ -123,8 +123,9 @@ guest. Não afirmar que funciona até haver.
 
 ### A armadilha do cwd, que nenhuma das duas ferramentas trata
 
-Pegar `children[0]` e ler o `cwd` dele — o que o `omaresume` faz — devolve o
-diretório errado com cara de certo. Medido no host: cada janela `kitty` tem PID
+Pegar `children[0]` e ler o `cwd` dele — o que uma abordagem mais simples faz —
+devolve o diretório errado com cara de certo. Medido no host: cada janela
+`kitty` tem PID
 próprio, mas seus filhos são `kitten` e `tmux: client`, **todos** reportando
 `$HOME`, enquanto os shells em que o usuário está vivem dentro do servidor do
 tmux, em outra árvore de processos. Restaurar sete terminais em `$HOME` teria

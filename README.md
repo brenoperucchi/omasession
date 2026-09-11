@@ -23,10 +23,8 @@ Hyprland 0.56 — the Omarchy 4 default — that syntax is rejected, and rejecte
 6-window session, hyprresume 0.5.0 restores **0 of 6** in 150 seconds and prints
 `restore complete: 6/6 apps (0 failed)`.
 
-That is no longer the whole story, and this README used to claim it was.
-`dimef.omaresume`, published to the plugin marketplace on 2026-09-08, speaks the
-same Lua dispatcher API. Speaking the API the compositor accepts is table
-stakes, not a differentiator. What separates this plugin is below: it resolves
+Speaking the Lua dispatcher API the compositor actually accepts is table
+stakes, not the whole job. What separates this plugin is below: it resolves
 arbitrary applications instead of a fixed list, and it knows what the browser
 actually needs in order to give its tabs back.
 
@@ -42,6 +40,7 @@ be written against a denominator from a different measurement, which is exactly
 the kind of number this README criticises elsewhere.
 
 Geometry, floating state and a terminal's working directory come back identical.
+
 ## Any application, not a list of eight
 
 A session restorer has to answer one question per window: what command brings
@@ -89,6 +88,20 @@ power loss and GPU lockups no hook could ever cover.
 Full result and the six hypotheses it eliminated:
 [`docs/plans/001-RESULTADO.md`](docs/plans/001-RESULTADO.md).
 
+## Grouped by monitor, not just workspace
+
+"Workspace 3" means a different desk depending on which screen it is on. With
+more than one monitor, the panel groups captured windows under the monitor
+they were on, each with its own set of workspaces underneath — not one long
+list where two unrelated windows share a number by coincidence.
+
+![Three monitors, six windows, all grouped correctly](screenshots/panel-multimonitor.png)
+
+The window list scrolls on its own, inside whatever room is actually left on
+screen — the header above it (the promise, Save now, Restore session) and the
+footer below it stay fixed and always reachable, however many monitors and
+workspaces there are to list.
+
 ## Never trade a good session for a worse one
 
 A session saver's worst failure is not missing a save — it is overwriting a good
@@ -108,6 +121,94 @@ itself never overwrites one that could. `test/guard-cases.sh` covers the cases
 (25 assertions, run against a live Hyprland, including killing the save at
 random and at the exact instant between the two publish renames).
 
+## Install
+
+The CLI lives inside the plugin's own directory — `omarchy plugin add` clones
+it there but does not put it on `PATH`, so every command below spells out
+where it is:
+
+```
+omarchy plugin add https://github.com/brenoperucchi/omasession --enable
+~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession install
+```
+
+`omarchy plugin add` fetches the plugin and drops the bar widget in place.
+`omasession install` is a separate, explicit step: it writes and enables the
+user-level snapshot timer (`systemctl --user`, no root), and adds the one
+login-restore line to `~/.config/hypr/autostart.lua` (a single marked line,
+never a full-file overwrite — see [Remove](#remove) for exactly what that
+undoes). Nothing captures or restores anything before this step runs.
+
+Depends on `python3`, `jq`, and `hyprctl` (all present on a stock Omarchy
+install). `tmux` is used only if a terminal window is already a tmux client —
+never required.
+
+**Chrome only, one-time, needs root:**
+
+```
+sudo ~/.config/omarchy/plugins/brenoperucchi.omasession/bin/browser-setup
+```
+
+Chrome replaces session restore with onboarding pages ("What's New", the
+default-browser prompt) on the first launch after every version bump, which
+silently drops the restore that run. Fixing this requires a browser policy
+file — Chrome ignores the same setting written to its own preferences by
+hand — so this one step writes a small JSON policy under
+`/etc/opt/chrome/policies/managed/` (and the equivalent path for any other
+Chromium-family browser found on the machine): `RestoreOnStartup: 1`, plus
+disabling the promo tab and the default-browser nag. It is opt-in, run by
+you, once — `omasession install` only ever asks `browser-setup --list-paths`
+which files to check for, read-only and root-free; it never writes the policy
+itself. Chromium itself does not need this and is unaffected if you skip it.
+
+## Usage
+
+The panel (bar widget) shows what was last captured and whether it can come
+back, with **Save now** and **Restore session** buttons. Everything it shows
+also works from the CLI, same path as above:
+
+```
+OMASESSION=~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession
+$OMASESSION save              # capture now, outside the timer's own cadence
+$OMASESSION restore           # replay the last capture into the compositor
+$OMASESSION status --json     # what the panel itself reads
+$OMASESSION resolve           # which command each current window would resolve to
+```
+
+## Configure
+
+Through the panel's settings, or directly with the same CLI:
+
+```
+OMASESSION=~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession
+$OMASESSION config set saveIntervalSec 30      # how often the timer snapshots
+$OMASESSION config set restoreOnLogin true     # replay automatically at login
+$OMASESSION config set browserRestore true     # let the browser reopen its own tabs
+```
+
+## Remove
+
+**In this order** — the CLI lives inside the plugin's directory, so uninstall
+first, or `omarchy plugin remove` deletes it out from under itself, leaving
+the timer, the login-restore line, and any browser policy from `browser-setup`
+all still active with nothing left to clean them up:
+
+```
+OMASESSION=~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession
+$OMASESSION uninstall
+sudo ~/.config/omarchy/plugins/brenoperucchi.omasession/bin/browser-setup --remove   # only if you ran browser-setup
+omarchy plugin remove brenoperucchi.omasession
+```
+
+`omasession uninstall` disables and deletes the snapshot timer, and removes
+only the marked login-restore line it added — anything else in
+`autostart.lua` is left exactly as it was. Saved sessions under
+`~/.local/share/omasession/` are left alone (delete that directory yourself
+if you want them gone too). It also reports whether `browser-setup`'s policy
+file is still present — that file is machine-wide and outside what an
+unprivileged `uninstall` can touch, which is why removing it is its own
+command above, not something `uninstall` does for you.
+
 ## Where it actually is
 
 | Piece | State |
@@ -115,7 +216,7 @@ random and at the exact instant between the two publish renames).
 | `lib/replay.py` — the replay engine | **works**, validated across four real reboots |
 | `lib/session-save.sh` — save + guard | **works**, 25/25 in `test/guard-cases.sh` |
 | `lib/resolve.py` — arbitrary application resolver | **works**, 19/19 against a real desktop |
-| `bin/browser-setup` — per-vendor policy | **works** |
+| `bin/browser-setup [--remove]` — per-vendor policy | **works**, install and removal both |
 | Browser tab restore | **understood and measured** — see the `exit_type` finding above |
 | `bin/omasession` — CLI (save/restore/status/resolve/install/uninstall/config) | **works**, exercised end to end in the lab |
 | `systemd/` snapshot timer | **works**, written and enabled by `omasession install` |
