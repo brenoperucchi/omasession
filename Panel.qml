@@ -1,4 +1,10 @@
 import QtQuick
+// Only for ScrollBar. Both this and qs.Ui export a `Button` -- QML resolves
+// to whichever import comes LAST, so qs.Ui below must stay after this one, or
+// the two Buttons below silently switch to QtQuick.Controls' own style with
+// no error. network/Panel.qml (Omarchy's own) keeps the same order for the
+// same reason.
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -255,8 +261,17 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
+    // maxHeight aqui e no orcamento do Flickable la embaixo tem que ser o
+    // MESMO valor -- achado da revisao (omasession-10, verificado ao vivo
+    // 2026-09-10): o orcamento usava availableCardHeight sozinho, sem este
+    // teto, entao com conteudo grande o suficiente (18 workspaces) o
+    // Flickable se permitia crescer mais do que a superficie do popup
+    // realmente tem (que E capada por este 680) -- o mesmo vazamento por
+    // cima da borda que este arquivo existe pra fechar, so que voltando pelo
+    // teto externo em vez da lista interna.
+    readonly property real maxHeight: Style.space(680)
     contentWidth: panel.fittedContentWidth(Style.space(430))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(680))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, maxHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -269,327 +284,388 @@ Panel {
         width: parent.width
         spacing: Style.spacing.lg
 
-        Item {
+        Column {
+          id: headerBlock
           width: parent.width
-          height: hero.implicitHeight
+          spacing: column.spacing
 
-          PanelHero {
-            id: hero
-            anchors.left: parent.left
-            anchors.right: loginToggle.left
-            anchors.rightMargin: Style.space(8)
-            title: "OmaSession"
-            // O `meta` do PanelHero é onde os painéis nativos do Omarchy põem
-            // estado, não slogan -- o tailscale escreve "Tailscale is
-            // disconnected" ali. "pick up where you left off" era tagline, e
-            // palavra por palavra a mesma do OmaResume. Este slot passa a
-            // responder a pergunta que o interruptor ao lado levanta e que
-            // antes só tinha resposta no hover -- PanelHero já deixa em
-            // caixa alta sozinho, por isso o texto aqui fica em minúsculas.
-            meta: root.cliMissing     ? "cli not installed"
-                : !root.status        ? "nothing saved yet"
-                : root.restoreOnLogin ? "restores on next login"
-                                      : "restore on login is off"
-            foreground: root.fg
-            iconComponent: Component {
-              Item {
-                implicitWidth: Style.font.display
-                implicitHeight: Style.font.display
-                OpticalGlyph {
-                  anchors.centerIn: parent
-                  text: ""
-                  color: root.fg
-                  fontSize: Style.font.display
-                }
-              }
-            }
-          }
+          Item {
+            width: parent.width
+            height: hero.implicitHeight
 
-          // O interruptor mora aqui, na linha do nome, porque é o estado do
-          // plugin inteiro -- não mais um item de lista entre outros. O texto
-          // aparece no hover e diz o que ACONTECE, não o que a opção se chama:
-          // a pergunta do usuário é "e se eu reiniciar agora?".
-          ToggleSwitch {
-            id: loginToggle
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            checked: root.restoreOnLogin
-            onToggled: {
-              if (root.mockMode) return
-              root.setRestoreOnLogin(loginToggle.checked)
-            }
-
-            // PanelToolTip é um ToolTip (Popup): não aceita anchors, e se
-            // posiciona sozinho quando é filho do item a que pertence. Tentar
-            // ancorá-lo derruba o widget inteiro com "Cannot assign to
-            // non-existent property verticalCenter" -- e derruba junto o ícone
-            // da barra, porque é o mesmo arquivo.
-            PanelToolTip {
-              visible: loginToggle.containsMouse
-              fontFamily: Style.font.family
-              text: root.restoreOnLogin
-                    ? "Reboot now and these windows come back"
-                    : "Reboot now and nothing reopens"
-            }
-          }
-        }
-
-        // ── CLI ausente ──────────────────────────────────────────────────
-        // "0 windows come back" com cara de sessão real, quando na verdade o
-        // CLI nem existe, seria pior que dizer nada: pareceria uma sessão
-        // vazia de verdade, não uma instalação incompleta. As duas causas têm
-        // ações diferentes -- rodar install, ou não fazer nada porque não há
-        // sessão mesmo -- e só uma mensagem explícita distingue.
-        Rectangle {
-          visible: !root.mockMode && root.cliMissing
-          width: parent.width
-          height: missingText.implicitHeight + Style.space(12)
-          radius: Style.space(3)
-          color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
-          Text {
-            id: missingText
-            anchors.left: parent.left; anchors.right: parent.right
-            anchors.margins: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            wrapMode: Text.WordWrap
-            color: root.fg
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            text: "omasession was not found at " + root.cliPath
-                + " -- install the plugin's CLI, or run `omasession install`."
-          }
-        }
-
-        Rectangle {
-          visible: !root.mockMode && !root.cliMissing && root.lastError !== ""
-          width: parent.width
-          height: errorText.implicitHeight + Style.space(12)
-          radius: Style.space(3)
-          color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
-          Text {
-            id: errorText
-            anchors.left: parent.left; anchors.right: parent.right
-            anchors.margins: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            wrapMode: Text.WordWrap
-            color: root.fg
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            text: root.lastError
-          }
-        }
-
-        // ── o cartão da sessão salva ─────────────────────────────────────
-        // O que estava salvo, quando, e os dois verbos. Os botões levam rótulo:
-        // um ícone sozinho na barra é aceitável porque tem tooltip, mas dentro
-        // do painel ninguém deveria adivinhar o que "salvar" e "restaurar" são.
-        Rectangle {
-          visible: root.mockMode || !root.cliMissing
-          width: parent.width
-          height: savedCol.implicitHeight + Style.space(18)
-          radius: Style.space(4)
-          color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.05)
-          border.width: 1
-          border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.10)
-
-          Column {
-            id: savedCol
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.margins: Style.space(9)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.md
-
-            // A pergunta que importa segundos antes de reiniciar não é
-            // "o que eu tenho aberto" -- isso está na tela. É "o que volta".
-            // Um inventário responde a primeira; este número responde a
-            // segunda, e é a única das duas que uma ferramenta com lista fixa
-            // de aplicativos não consegue responder, porque ela não distingue
-            // "não suportado" de "vai funcionar".
-            Text {
-              text: root.comingBack === root.windowCount
-                    ? "All " + root.windowCount + " come back"
-                    : root.comingBack + " of " + root.windowCount + " come back"
-              color: root.unresolvable > 0 ? Color.urgent : root.fg
-              font.family: Style.font.family
-              font.pixelSize: Style.font.subtitle
-            }
-
-            // ── a régua do que volta ─────────────────────────────────────
-            // Um segmento por janela capturada: aceso = tem comando para
-            // reabrir, apagado = não tem. É a frase acima em forma de
-            // desenho, e é a marca que o OmaResume não copia sem antes ter
-            // um resolvedor -- a régua dele seria sempre cheia, porque todo
-            // item dele diz "Ready". Sem campo novo: `resolvable` já está
-            // no contrato.
-            Item {
-              id: ruler
-              width: parent.width
-              height: Style.space(4)
-              visible: root.captured.length > 0
-
-              // A largura vem do pai (savedCol, que tem largura por
-              // anchors), nunca da soma dos filhos: um Row dimensionado
-              // pelos filhos que se dimensionam pelo Row é o laço de
-              // binding clássico, a mesma família da armadilha de
-              // implicitWidth do PANEL.md.
-              readonly property real gap: Style.spacing.sm
-              readonly property real seg:
-                Math.max(1, (width - gap * Math.max(0, root.captured.length - 1))
-                            / Math.max(1, root.captured.length))
-
-              Repeater {
-                model: root.captured
-                Rectangle {
-                  x: index * (ruler.seg + ruler.gap)
-                  width: ruler.seg
-                  height: ruler.height
-                  radius: height / 2
-                  color: modelData.resolvable
-                         ? Color.accent
-                         : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.18)
+            PanelHero {
+              id: hero
+              anchors.left: parent.left
+              anchors.right: loginToggle.left
+              anchors.rightMargin: Style.space(8)
+              title: "OmaSession"
+              // O `meta` do PanelHero é onde os painéis nativos do Omarchy põem
+              // estado, não slogan -- o tailscale escreve "Tailscale is
+              // disconnected" ali. "pick up where you left off" era tagline,
+              // igual à de outro plugin da mesma categoria. Este slot passa a
+              // responder a pergunta que o interruptor ao lado levanta e que
+              // antes só tinha resposta no hover -- PanelHero já deixa em
+              // caixa alta sozinho, por isso o texto aqui fica em minúsculas.
+              meta: root.cliMissing     ? "cli not installed"
+                  : !root.status        ? "nothing saved yet"
+                  : root.restoreOnLogin ? "restores on next login"
+                                        : "restore on login is off"
+              foreground: root.fg
+              iconComponent: Component {
+                Item {
+                  implicitWidth: Style.font.display
+                  implicitHeight: Style.font.display
+                  OpticalGlyph {
+                    anchors.centerIn: parent
+                    text: ""
+                    color: root.fg
+                    fontSize: Style.font.display
+                  }
                 }
               }
             }
 
+            // O interruptor mora aqui, na linha do nome, porque é o estado do
+            // plugin inteiro -- não mais um item de lista entre outros. O texto
+            // aparece no hover e diz o que ACONTECE, não o que a opção se chama:
+            // a pergunta do usuário é "e se eu reiniciar agora?".
+            ToggleSwitch {
+              id: loginToggle
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              checked: root.restoreOnLogin
+              onToggled: {
+                if (root.mockMode) return
+                root.setRestoreOnLogin(loginToggle.checked)
+              }
+
+              // PanelToolTip é um ToolTip (Popup): não aceita anchors, e se
+              // posiciona sozinho quando é filho do item a que pertence. Tentar
+              // ancorá-lo derruba o widget inteiro com "Cannot assign to
+              // non-existent property verticalCenter" -- e derruba junto o ícone
+              // da barra, porque é o mesmo arquivo.
+              PanelToolTip {
+                visible: loginToggle.containsMouse
+                fontFamily: Style.font.family
+                text: root.restoreOnLogin
+                      ? "Reboot now and these windows come back"
+                      : "Reboot now and nothing reopens"
+              }
+            }
+          }
+
+          // ── CLI ausente ──────────────────────────────────────────────────
+          // "0 windows come back" com cara de sessão real, quando na verdade o
+          // CLI nem existe, seria pior que dizer nada: pareceria uma sessão
+          // vazia de verdade, não uma instalação incompleta. As duas causas têm
+          // ações diferentes -- rodar install, ou não fazer nada porque não há
+          // sessão mesmo -- e só uma mensagem explícita distingue.
+          Rectangle {
+            visible: !root.mockMode && root.cliMissing
+            width: parent.width
+            height: missingText.implicitHeight + Style.space(12)
+            radius: Style.space(3)
+            color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
             Text {
-              width: parent.width
+              id: missingText
+              anchors.left: parent.left; anchors.right: parent.right
+              anchors.margins: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
               wrapMode: Text.WordWrap
-              text: root.workspaceCount
-                    + (root.workspaceCount === 1 ? " workspace" : " workspaces")
-                    + (root.multiMonitor ? ", " + root.byMonitor.length + " monitors" : "")
-                    + (root.status ? " · saved " + root.agoText : "")
-              color: root.dim
+              color: root.fg
               font.family: Style.font.family
-              font.pixelSize: Style.font.caption
+              font.pixelSize: Style.font.bodySmall
+              text: "omasession was not found at " + root.cliPath
+                  + " -- install the plugin's CLI, or run `omasession install`."
             }
+          }
 
-            Row {
-              width: parent.width
-              spacing: Style.spacing.lg
+          Rectangle {
+            visible: !root.mockMode && !root.cliMissing && root.lastError !== ""
+            width: parent.width
+            height: errorText.implicitHeight + Style.space(12)
+            radius: Style.space(3)
+            color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
+            Text {
+              id: errorText
+              anchors.left: parent.left; anchors.right: parent.right
+              anchors.margins: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              wrapMode: Text.WordWrap
+              color: root.fg
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              text: root.lastError
+            }
+          }
 
-              Button {
-                text: "Save now"
-                bordered: true
-                enabled: !root.mockMode && !saveProc.running
-                onClicked: saveProc.running = true
+          // ── o cartão da sessão salva ─────────────────────────────────────
+          // O que estava salvo, quando, e os dois verbos. Os botões levam rótulo:
+          // um ícone sozinho na barra é aceitável porque tem tooltip, mas dentro
+          // do painel ninguém deveria adivinhar o que "salvar" e "restaurar" são.
+          Rectangle {
+            visible: root.mockMode || !root.cliMissing
+            width: parent.width
+            height: savedCol.implicitHeight + Style.space(18)
+            radius: Style.space(4)
+            color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.05)
+            border.width: 1
+            border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.10)
+
+            Column {
+              id: savedCol
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.margins: Style.space(9)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.spacing.md
+
+              // A pergunta que importa segundos antes de reiniciar não é
+              // "o que eu tenho aberto" -- isso está na tela. É "o que volta".
+              // Um inventário responde a primeira; este número responde a
+              // segunda, e é a única das duas que uma ferramenta com lista fixa
+              // de aplicativos não consegue responder, porque ela não distingue
+              // "não suportado" de "vai funcionar".
+              Text {
+                text: root.comingBack === root.windowCount
+                      ? "All " + root.windowCount + " come back"
+                      : root.comingBack + " of " + root.windowCount + " come back"
+                color: root.unresolvable > 0 ? Color.urgent : root.fg
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
               }
-              Button {
-                text: "Restore session"
-                bordered: true
-                enabled: !root.mockMode && !restoreProc.running
-                onClicked: restoreProc.running = true
+
+              // ── a régua do que volta ─────────────────────────────────────
+              // Um segmento por janela capturada: aceso = tem comando para
+              // reabrir, apagado = não tem. É a frase acima em forma de
+              // desenho, e é uma marca que só faz sentido com um resolvedor de
+              // verdade por trás -- sem um, a régua seria sempre cheia, porque
+              // toda janela na lista diria "Ready". Sem campo novo: `resolvable`
+              // já está no contrato.
+              Item {
+                id: ruler
+                width: parent.width
+                height: Style.space(4)
+                visible: root.captured.length > 0
+
+                // A largura vem do pai (savedCol, que tem largura por
+                // anchors), nunca da soma dos filhos: um Row dimensionado
+                // pelos filhos que se dimensionam pelo Row é o laço de
+                // binding clássico, a mesma família da armadilha de
+                // implicitWidth do PANEL.md.
+                readonly property real gap: Style.spacing.sm
+                readonly property real seg:
+                  Math.max(1, (width - gap * Math.max(0, root.captured.length - 1))
+                              / Math.max(1, root.captured.length))
+
+                Repeater {
+                  model: root.captured
+                  Rectangle {
+                    x: index * (ruler.seg + ruler.gap)
+                    width: ruler.seg
+                    height: ruler.height
+                    radius: height / 2
+                    color: modelData.resolvable
+                           ? Color.accent
+                           : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.18)
+                  }
+                }
+              }
+
+              Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: root.workspaceCount
+                      + (root.workspaceCount === 1 ? " workspace" : " workspaces")
+                      + (root.multiMonitor ? ", " + root.byMonitor.length + " monitors" : "")
+                      + (root.status ? " · saved " + root.agoText : "")
+                color: root.dim
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.spacing.lg
+
+                Button {
+                  text: "Save now"
+                  bordered: true
+                  enabled: !root.mockMode && !saveProc.running
+                  onClicked: saveProc.running = true
+                }
+                Button {
+                  text: "Restore session"
+                  bordered: true
+                  enabled: !root.mockMode && !restoreProc.running
+                  onClicked: restoreProc.running = true
+                }
               }
             }
           }
-        }
 
-        // ── avisos ───────────────────────────────────────────────────────
-        // Nada disto existe no OmaResume, e é o que impede este painel de ser
-        // decorativo: o guard recusando e um segundo escritor nos mesmos
-        // arquivos são as duas formas de perder a sessão sem perceber.
-        Rectangle {
-          visible: root.guardRefused
-          width: parent.width
-          height: refusedText.implicitHeight + Style.space(12)
-          radius: Style.space(3)
-          color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.14)
-          Text {
-            id: refusedText
-            anchors.left: parent.left; anchors.right: parent.right
-            anchors.margins: Style.space(6)
-            anchors.verticalCenter: parent.verticalCenter
-            wrapMode: Text.WordWrap
-            color: root.fg
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            text: "Last save refused, session preserved — "
-                  + (root.status ? root.status.detail : "")
+          // ── avisos ───────────────────────────────────────────────────────
+          // O que impede este painel de ser decorativo: o guard recusando e um
+          // segundo escritor nos mesmos arquivos são as duas formas de perder
+          // a sessão sem perceber.
+          Rectangle {
+            visible: root.guardRefused
+            width: parent.width
+            height: refusedText.implicitHeight + Style.space(12)
+            radius: Style.space(3)
+            color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.14)
+            Text {
+              id: refusedText
+              anchors.left: parent.left; anchors.right: parent.right
+              anchors.margins: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              wrapMode: Text.WordWrap
+              color: root.fg
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              text: "Last save refused, session preserved — "
+                    + (root.status ? root.status.detail : "")
+            }
           }
-        }
 
-        PanelSeparator { width: parent.width; visible: root.mockMode || !root.cliMissing }
+          PanelSeparator { width: parent.width; visible: root.mockMode || !root.cliMissing }
+        }
 
         // ── as janelas: monitor -> grade de cards ─────────────────────────
-        // Uma linha por app, cheia de largura, é a mesma silhueta do
-        // OmaResume (um item = uma linha). Uma grade de 2 colunas por
-        // monitor é mais densa e não precisa do cabeçalho "WORKSPACE N"
+        // Uma linha por app, cheia de largura, é a silhueta mais comum nessa
+        // categoria de painel (um item = uma linha). Uma grade de 2 colunas
+        // por monitor é mais densa e não precisa do cabeçalho "WORKSPACE N"
         // repetido pra cada grupo -- o número de workspace vira um detalhe
         // discreto dentro do próprio card, não uma linha inteira por grupo.
-        Repeater {
-          model: (root.mockMode || !root.cliMissing) ? root.byMonitor : []
+        //
+        // Isto e o unico trecho rolavel do painel, de proposito: um Column
+        // puro so cresce, e sem um Flickable clipando o conteudo uma sessao
+        // real com varios monitores estourava a borda do painel por baixo --
+        // o card acabava desenhado por cima do wallpaper, fora da moldura.
+        // Cabecalho (hero, promessa, botoes) e rodape (cadencia do snapshot)
+        // ficam FORA deste Flickable de proposito -- sempre visiveis, so a
+        // lista em si rola. Idioma copiado do proprio plugin de rede do
+        // Omarchy (network/Panel.qml), que resolve o mesmo problema pra uma
+        // lista de redes Wi-Fi.
+        //
+        // O teto nao pode ser um Style.space(N) fixo -- achado da revisao
+        // (omasession-10): um valor em space() cresce com a escala de fonte
+        // (effectiveSpacingScale), mas panel.availableCardHeight e o espaco
+        // FISICO da tela e nao acompanha -- numa tela baixa com fonte grande
+        // e o banner de "refused" visivel, cabecalho + rodape + um teto fixo
+        // ja passavam do que a superficie do painel realmente tem, o mesmo
+        // vazamento que este Flickable existe pra fechar, so que vindo de
+        // cima em vez de vir da lista. headerBlock/footerBlock sao irmaos da
+        // lista, nao ancestrais dela -- medir os dois aqui nao cria o ciclo
+        // de binding que mediria a coluna inteira (que contem este Flickable).
+        Flickable {
+          id: monitorScroll
+          width: parent.width
+          // availableCardHeight cai pra 0 (nao "sem teto") quando `screen`
+          // ainda nao resolveu -- o proprio KeyboardPanel guarda os outros
+          // dois lugares que a le (fittedContentWidth/Height) com esse mesmo
+          // "> 0 ? valor : desired". Sem o guard aqui, um 0 vira Math.min(0,
+          // maxHeight) = 0, o budget fica bem negativo, e o Math.max(0, ...)
+          // la embaixo apaga a lista inteira -- indistinguivel de "nenhuma
+          // janela capturada" -- achado da revisao (omasession-11).
+          readonly property real surface: panel.availableCardHeight > 0
+                                         ? Math.min(panel.availableCardHeight, panel.maxHeight)
+                                         : panel.maxHeight
+          readonly property real budget: surface
+                                        - panel.verticalContentInset
+                                        - headerBlock.implicitHeight
+                                        - footerBlock.implicitHeight
+                                        - column.spacing * 2
+          height: Math.max(0, Math.min(monitorList.implicitHeight, budget))
+          contentWidth: width
+          contentHeight: monitorList.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          interactive: contentHeight > height
+
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
           Column {
-            width: column.width
-            spacing: Style.spacing.sm
+            id: monitorList
+            width: monitorScroll.width
+            spacing: Style.spacing.lg
 
-            // O nível do monitor só aparece quando há mais de um. Numa tela só
-            // ele seria uma linha constante repetindo o óbvio.
-            Text {
-              visible: root.multiMonitor
-              text: modelData.mon
-              color: Color.accent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
+            Repeater {
+              model: (root.mockMode || !root.cliMissing) ? root.byMonitor : []
 
-            Grid {
-              id: appGrid
-              width: parent.width
-              columns: 2
-              columnSpacing: Style.spacing.sm
-              rowSpacing: Style.spacing.sm
+              Column {
+                width: monitorList.width
+                spacing: Style.spacing.sm
 
-              Repeater {
-                model: modelData.flatItems
+                // O nível do monitor só aparece quando há mais de um. Numa
+                // tela só ele seria uma linha constante repetindo o óbvio.
+                Text {
+                  visible: root.multiMonitor
+                  text: modelData.mon
+                  color: Color.accent
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
 
-                Rectangle {
-                  width: (appGrid.width - appGrid.columnSpacing) / 2
-                  height: tileCol.implicitHeight + Style.space(14)
-                  radius: Style.space(3)
-                  color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+                Grid {
+                  id: appGrid
+                  width: parent.width
+                  columns: 2
+                  columnSpacing: Style.spacing.sm
+                  rowSpacing: Style.spacing.sm
 
-                  Column {
-                    id: tileCol
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.margins: Style.space(8)
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.spacing.xxs
+                  Repeater {
+                    model: modelData.flatItems
 
-                    Text {
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: modelData.app
-                      color: root.fg
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.body
-                    }
-                    // O que este card vai RECUPERAR. Para um terminal é o
-                    // diretório -- e quando não dá para recuperá-lo, dizer
-                    // isso vale mais que repetir o título da janela, que
-                    // ninguém vai reconhecer depois do reboot de qualquer
-                    // forma. "ws N" na frente porque o card sozinho, sem o
-                    // cabeçalho de grupo que existia antes, não diz mais em
-                    // que workspace a janela volta.
-                    Text {
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: "ws" + modelData.ws + " · " + (modelData.detail || modelData.title)
-                      color: root.dim
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.caption
-                    }
-                    // Silêncio significa "vai voltar". Só a exceção fala.
-                    Text {
-                      width: parent.width
-                      elide: Text.ElideRight
-                      visible: text !== ""
-                      text: !modelData.resolvable ? "no command"
-                            : (modelData.warn || "")
-                      color: Color.urgent
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.caption
+                    Rectangle {
+                      width: (appGrid.width - appGrid.columnSpacing) / 2
+                      height: tileCol.implicitHeight + Style.space(14)
+                      radius: Style.space(3)
+                      color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+
+                      Column {
+                        id: tileCol
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.margins: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.spacing.xxs
+
+                        Text {
+                          width: parent.width
+                          elide: Text.ElideRight
+                          text: modelData.app
+                          color: root.fg
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.body
+                        }
+                        // O que este card vai RECUPERAR. Para um terminal é o
+                        // diretório -- e quando não dá para recuperá-lo, dizer
+                        // isso vale mais que repetir o título da janela, que
+                        // ninguém vai reconhecer depois do reboot de qualquer
+                        // forma. "ws N" na frente porque o card sozinho, sem
+                        // o cabeçalho de grupo que existia antes, não diz
+                        // mais em que workspace a janela volta.
+                        Text {
+                          width: parent.width
+                          elide: Text.ElideRight
+                          text: "ws" + modelData.ws + " · " + (modelData.detail || modelData.title)
+                          color: root.dim
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                        }
+                        // Silêncio significa "vai voltar". Só a exceção fala.
+                        Text {
+                          width: parent.width
+                          elide: Text.ElideRight
+                          visible: text !== ""
+                          text: !modelData.resolvable ? "no command"
+                                : (modelData.warn || "")
+                          color: Color.urgent
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                        }
+                      }
                     }
                   }
                 }
@@ -598,21 +674,27 @@ Panel {
           }
         }
 
-        PanelSeparator { width: parent.width; visible: root.mockMode || !root.cliMissing }
-
-        Text {
-          visible: root.mockMode || !root.cliMissing
+        Column {
+          id: footerBlock
           width: parent.width
-          wrapMode: Text.WordWrap
-          color: root.dim
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          text: {
-            var base = "Snapshot every " + root.intervalSec + "s"
-            if (root.unresolvable > 0)
-              return base + " · " + root.unresolvable
-                     + " window(s) have no launch command; nothing will reopen them"
-            return base
+          spacing: column.spacing
+
+          PanelSeparator { width: parent.width; visible: root.mockMode || !root.cliMissing }
+
+          Text {
+            visible: root.mockMode || !root.cliMissing
+            width: parent.width
+            wrapMode: Text.WordWrap
+            color: root.dim
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            text: {
+              var base = "Snapshot every " + root.intervalSec + "s"
+              if (root.unresolvable > 0)
+                return base + " · " + root.unresolvable
+                       + " window(s) have no launch command; nothing will reopen them"
+              return base
+            }
           }
         }
       }

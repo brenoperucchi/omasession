@@ -87,6 +87,59 @@ sinal.
   `unknown command: config` no stderr do `Process`. Sempre copiar com o
   caminho de destino completo e explícito por arquivo quando a origem tem
   subdiretório.
+- **Um `Column` puro não sabe parar de crescer.** Numa sessão real com 3
+  monitores e várias janelas por workspace (achado do usuário, não do lab), a
+  grade de cards estourava o limite de altura do `KeyboardPanel` e continuava
+  desenhando por cima do wallpaper, fora da própria moldura azul do painel --
+  `contentHeight: panel.fittedContentHeight(...)` limita só a janela/surface,
+  nunca o conteúdo dela. Resolvido em 2026-09-10 envolvendo só a lista de
+  monitores (não o cabeçalho nem o rodapé) num `Flickable` com `clip: true`,
+  mesmo idioma que `network/Panel.qml` já usa pra lista de redes Wi-Fi.
+  Verificado ao vivo no lab com 3 monitores reais (`hyprctl output create
+  headless <nome>` -- aceita um nome de saída como segundo argumento, não
+  documentado em `hyprctl output --help`, útil pra simular `DP-1`/`HDMI-A-1`
+  em vez de `HEADLESS-N`) e 6 workspaces: o conteúdo que excede a altura
+  disponível fica escondido no scroll, nunca vaza pra fora da borda, e o
+  rodapé "Snapshot every 30s" continua visível abaixo da lista.
+
+  Primeira versão do fix capava a altura em `Style.space(320)` fixo -- achado
+  da revisão (omasession-10): um valor em `space()` cresce com a escala de
+  fonte, mas `panel.availableCardHeight` é o espaço físico da tela e não
+  acompanha, então numa tela baixa com fonte grande e o banner de `refused`
+  visível o mesmo vazamento podia voltar, só que vindo do cabeçalho/rodapé em
+  vez da lista. Corrigido medindo o espaço de verdade: `headerBlock` e
+  `footerBlock` (os `Column` que envolvem tudo antes/depois do `Flickable`)
+  são irmãos dele, não ancestrais -- então `panel.availableCardHeight -
+  panel.verticalContentInset - headerBlock.implicitHeight -
+  footerBlock.implicitHeight` dá o teto real sem criar ciclo de binding (que
+  aconteceria se a conta usasse `column.implicitHeight`, que contém o próprio
+  `Flickable`). `qmllint Panel.qml` (instalado nesta máquina, confirmado que
+  detecta erro de sintaxe de verdade antes de confiar nele) passa limpo --
+  vale usar em vez de contar chaves na mão daqui pra frente.
+
+  **Essa segunda versão *também* vazou**, medido ao vivo empilhando 18
+  workspaces reais num monitor só (28 janelas) -- o mesmo efeito do bug
+  original, só que a partir de ~ws12 em diante, com o conteúdo desenhando
+  sobre o wallpaper fantasmagoricamente (sem fundo opaco) em vez de dentro da
+  borda. Causa: o orçamento do `Flickable` usava só
+  `panel.availableCardHeight`, mas a superfície real do popup é
+  `Math.min(availableCardHeight, Style.space(680))` -- o `680` que já existia
+  em `contentHeight: panel.fittedContentHeight(column.implicitHeight,
+  Style.space(680))`. Numa tela alta (a do lab, 1371px), `availableCardHeight`
+  passa de 680 fácil, então o orçamento do Flickable permitia crescer mais do
+  que a superfície onde ele de fato mora. Corrigido nomeando o teto uma vez
+  (`readonly property real maxHeight: Style.space(680)` na instância do
+  `KeyboardPanel` em `Panel.qml`, não no componente do shell) e
+  usando `Math.min(panel.availableCardHeight, panel.maxHeight)` nos dois
+  lugares -- `contentHeight:` e o orçamento do Flickable -- em vez de duas
+  contas que podiam divergir. Reverificado com a mesma sessão de 18
+  workspaces: borda fecha limpa, nada vaza, `Snapshot every 30s` continua
+  visível.
+
+  A lição que fica: qualquer teto novo que este painel ganhar tem que ser
+  comparado contra TODO limite que já existe pra mesma superfície, não só
+  contra o espaço físico da tela -- um cálculo "mais correto" que ignora um
+  cap fixo já existente ainda pode vazar, só que num limiar mais alto.
 
 ## Três APIs que eu tinha suposto errado
 
@@ -131,8 +184,11 @@ Validado round-trip no guest: `config set` disparado pelo toggle grava em
 temporária que logou `stdout`/`stderr`/`exit code` do `Process` e leu o
 arquivo depois — removida do arquivo final).
 
-## Pendência cosmética
+## Resolvido: o ícone do PanelHero não desenhava
 
-O `iconComponent` do `PanelHero` (o glifo ao lado de "OmaSession") continua
-sem desenhar — mesma família de armadilha do `implicitWidth`/`BarIconButton`
-acima, ainda não investigada a fundo porque não impede nada funcional.
+O `iconComponent` do `PanelHero` (o glifo ao lado de "OmaSession") não
+desenhava nada -- mas não pela armadilha do `implicitWidth`/`BarIconButton`
+acima, como uma nota anterior aqui chegou a supor. A causa era mais simples:
+o `OpticalGlyph` estava com `text: ""` literalmente vazio, nunca recebeu o
+glifo. Resolvido em 2026-09-10 copiando o mesmo `` que o `BarIconButton`
+já usava (`Panel.qml:244` e `:300`, bytes idênticos).
