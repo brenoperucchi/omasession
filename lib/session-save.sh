@@ -36,6 +36,12 @@
 
 set -euo pipefail
 
+# Mesmo motivo do bin/omasession: nunca confiar no PATH herdado do timer/
+# autostart. /usr/local/{s,}bin entram também -- ainda root-owned, e onde um
+# Hyprland compilado da fonte instala `hyprctl`. Achado da revisão de
+# segurança do marketplace (issue #6243, refinado na rodada omasession-12).
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
+
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 if [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then
     HYPRLAND_INSTANCE_SIGNATURE="$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)"
@@ -70,7 +76,19 @@ fi
 # Read the screen ONCE. Counting here and building the sidecar from a second
 # read lets windows appear or vanish in between, which silently decides the
 # guard on different evidence than the one it protects.
-if ! clients="$(hyprctl clients -j 2>/dev/null)" || [[ -z "$clients" ]]; then
+#
+# `timeout` because nothing bounds how long a wedged compositor socket could
+# hang this call otherwise -- and the flock above is held the whole time, so
+# one stuck hyprctl would fail every timer tick after it, forever, with "a
+# save is running" as the only symptom. Achado da revisão de segurança do
+# marketplace (issue #6243). Same reasoning applies to every child that runs
+# under this same lock, capture.py/annotate.py included below -- both are
+# wrapped too, not just this one. capture.py's own subprocess calls already
+# carry timeout=15 internally, which is why this was "almost" bounded before
+# either wrap existed; almost is not the same claim as bounded, and a future
+# change to what capture.py does (a retry loop, a network filesystem read)
+# would have silently reopened exactly this hole.
+if ! clients="$(timeout --kill-after=5 15 hyprctl clients -j 2>/dev/null)" || [[ -z "$clients" ]]; then
     err "cannot read hyprctl clients -- session left untouched"
     exit 3
 fi
@@ -187,7 +205,7 @@ capture_err="$(mktemp "$SESSION_DIR/.$NAME.capture-err.XXXXXX")"
 # ou abrindo entre as duas leituras faz count_new (desta leitura) e
 # count_screen (da leitura de cima) discordarem por um motivo que não é nem
 # save incompleto nem sessão vazia.
-if ! python3 "$CAPTURE" "$NAME" <<<"$clients" > "$STAGING_TOML.raw" 2>"$capture_err"; then
+if ! timeout --kill-after=5 30 python3 "$CAPTURE" "$NAME" <<<"$clients" > "$STAGING_TOML.raw" 2>"$capture_err"; then
     err "capture failed: $(tail -3 "$capture_err")"
     rm -f "$capture_err" "$STAGING_TOML.raw"
     exit 3
@@ -259,7 +277,7 @@ printf '\n[omasession]\ngeneration = "%s"\n' "$GENERATION" >> "$STAGING_TOML"
 # O sidecar sai da MESMA leitura que decidiu o guard: contar de uma leitura e
 # gravar de outra deixa janelas aparecerem ou sumirem entre as duas, e decide o
 # guard sobre evidência diferente da que ele protege.
-monitors="$(hyprctl monitors -j 2>/dev/null || echo '[]')"
+monitors="$(timeout --kill-after=5 15 hyprctl monitors -j 2>/dev/null || echo '[]')"
 # `partial` viaja com o par. Sem isto a escotilha publicava um toml de uma
 # janela ao lado de um sidecar de seis, os dois com o mesmo selo -- o "coerente
 # por selo e incoerente por conteúdo" que esta rodada acabou de identificar como
@@ -286,7 +304,7 @@ jq --arg when "$(date -u +%FT%TZ)" --arg gen "$GENERATION" \
 # O que só um processo vivo sabe dizer: o diretório real de cada terminal, ou
 # por que ele não é recuperável. Depois do reboot isso não existe em lugar
 # nenhum.
-python3 "$(dirname "${BASH_SOURCE[0]}")/annotate.py" "$STAGING_SIDECAR.raw" > "$STAGING_SIDECAR" \
+timeout --kill-after=5 30 python3 "$(dirname "${BASH_SOURCE[0]}")/annotate.py" "$STAGING_SIDECAR.raw" > "$STAGING_SIDECAR" \
     2>/dev/null || mv -f "$STAGING_SIDECAR.raw" "$STAGING_SIDECAR"
 rm -f "$STAGING_SIDECAR.raw"
 

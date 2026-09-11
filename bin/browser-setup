@@ -11,12 +11,18 @@
 
 set -euo pipefail
 
-# RestoreOnStartup=1 ("restore the last session") has to come from a policy,
-# not from the profile: Chrome protects that preference with an HMAC in
-# Secure Preferences and silently ignores a value edited into Preferences by
-# hand. That is why forging it worked only after a hard kill -- crash recovery
-# takes a different path -- and never survived a clean reboot.
-POLICY='{"RestoreOnStartup": 1, "PromotionalTabsEnabled": false, "DefaultBrowserSettingEnabled": false}'
+# Nunca confiar no PATH herdado. Este script roda como root (sudo), o que
+# torna um binário shadowed ainda mais grave aqui do que num processo de
+# usuário -- achado da revisão de segurança do marketplace (issue #6243).
+# /usr/local/{s,}bin entram também: ainda são root-owned num sistema padrão
+# (não carregam o risco que motivou o pin -- shims de mise/asdf, ~/.local/bin,
+# Homebrew), e é onde um Hyprland compilado da fonte (`make install`) instala
+# `hyprctl` por padrão -- um PATH estreito demais faz o script inteiro parar
+# de achar navegadores/binários legítimos em silêncio, achado da revisão.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+POLICY_PY="$SELF/lib/browser_policy.py"
 
 # Each vendor reads its own policy directory; writing to all present ones is
 # cheaper than detecting which browser the user will install next.
@@ -61,19 +67,38 @@ esac
 
 (( EUID == 0 )) || die "needs root to change policy files (run with sudo)"
 
+# The actual write/delete lives in lib/browser_policy.py, not here -- found by
+# review (omasession-12), on two fronts at once. First, a directory that is
+# root-owned right now does not stay that way between a bash `realpath`/`stat`
+# check and the `mktemp`/`mv` that followed it by path a moment later: a
+# symlink swapped into the chain in that window raced the check, and the
+# reviewer reproduced it live. Second, that same check only ever covered
+# install -- remove walked the identical POLICY_DIRS with a bare `rm -f` and
+# no check at all, leaving an as-root arbitrary-delete primitive open right
+# next to the path that had just been closed. Bash has no portable way to
+# open a directory and refuse a symlink atomically (O_DIRECTORY|O_NOFOLLOW)
+# and then act relative to that descriptor rather than a path string again;
+# Python's os.open/openat/rename with dir_fd= does, so both install and
+# remove now go through the same helper, which walks and verifies the whole
+# path component by component -- not just the final directory -- before ever
+# touching a name inside it.
 # --remove undoes exactly what installing wrote, machine-wide: the policy has
 # no per-machine record of which vendors THIS script configured, so remove
 # checks every directory the install loop knows about, not just the ones with
 # a browser installed right now -- a browser removed since install would
 # otherwise leave its policy file behind forever, unreachable by either path.
+# `create=False` in the Python helper is what keeps this sweep from also
+# manufacturing empty policy directories for vendors that were never
+# installed -- achado da revisão (omasession-13): a primeira versão do
+# helper reusava a mesma função que cria diretórios faltantes.
 if [[ "${1:-}" == "--remove" ]]; then
     removed=0
     for vendor in "${!POLICY_DIRS[@]}"; do
-        file="${POLICY_DIRS[$vendor]}/omasession-no-promo.json"
-        [[ -f "$file" ]] || continue
-        rm -f "$file"
-        printf 'browser-setup: removed %s\n' "$file"
-        removed=$((removed + 1))
+        out="$(python3 "$POLICY_PY" remove "${POLICY_DIRS[$vendor]}")" || continue
+        if [[ "$out" == "removed "* ]]; then
+            printf 'browser-setup: %s\n' "$out"
+            removed=$((removed + 1))
+        fi
     done
     if (( removed == 0 )); then
         echo "browser-setup: no policy files present; nothing to remove"
@@ -87,11 +112,12 @@ installed=0
 for vendor in "${!POLICY_DIRS[@]}"; do
     command -v "${BINARIES[$vendor]}" >/dev/null 2>&1 || continue
     dir="${POLICY_DIRS[$vendor]}"
-    mkdir -p "$dir"
-    printf '%s\n' "$POLICY" > "$dir/omasession-no-promo.json"
-    chmod 644 "$dir/omasession-no-promo.json"
-    printf 'browser-setup: %s → %s/omasession-no-promo.json\n' "$vendor" "$dir"
-    installed=$((installed + 1))
+    if out="$(python3 "$POLICY_PY" install "$dir")"; then
+        printf 'browser-setup: %s → %s\n' "$vendor" "$out"
+        installed=$((installed + 1))
+    else
+        printf 'browser-setup: could not configure %s\n' "$vendor" >&2
+    fi
 done
 
 if (( installed == 0 )); then

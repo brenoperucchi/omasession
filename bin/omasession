@@ -18,6 +18,24 @@
 
 set -euo pipefail
 
+# Nunca confiar no PATH herdado. O timer systemd e o autostart de login
+# herdam o ambiente da sessão gráfica, que pode ter diretórios do próprio
+# usuário (mise/asdf shims, ~/.local/bin, ~/bin, Homebrew) antes do sistema --
+# medido nesta mesma máquina: `python3` e `flock` resolviam pro Homebrew, não
+# pro `/usr/bin` do sistema, porque o PATH da sessão os lista primeiro. Um
+# binário com o mesmo nome num desses diretórios rodaria automaticamente
+# dentro da sessão do usuário, sem ninguém notar. Achado da revisão de
+# segurança do marketplace (issue #6243). Todo processo filho (python3,
+# session-save.sh, o replay) herda este PATH já fixado.
+#
+# /usr/local/{s,}bin entram também -- achado da revisão (omasession-12):
+# ainda são root-owned num sistema padrão, não carregam o risco que motivou
+# o pin, e é onde um Hyprland compilado da fonte (`make install`) instala
+# `hyprctl` por padrão. Excluí-los faria o plugin inteiro parar de achar o
+# compositor em silêncio numa instalação assim, o mesmo tipo de regressão
+# que este pin existe pra evitar do lado oposto.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
+
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB="$SELF/lib"
 
@@ -261,7 +279,7 @@ cmd_resolve() {
     [[ "${1:-}" == "--json" ]] && json=1
 
     local out
-    out="$(hyprctl clients -j | python3 "$LIB/resolve_cli.py")" || die "resolve failed"
+    out="$(timeout --kill-after=5 15 hyprctl clients -j | python3 "$LIB/resolve_cli.py")" || die "resolve failed"
     if (( json )); then printf '%s\n' "$out"; return; fi
 
     jq -r '.[] | "  \(.via | . + (" " * (10 - length)))  \(.class)"
