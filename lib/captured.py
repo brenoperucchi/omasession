@@ -22,6 +22,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resolve as R  # noqa: E402
+from safe_fs import read_capped_path  # noqa: E402
+
+# Este é o script que monta o que o painel de fato mostra -- achado da
+# revisão de segurança do marketplace (issue #6243): sem teto, um toml ou
+# sidecar corrompido/gigante seria lido inteiro pra memória antes de o parse
+# falhar. Importa read_capped_path de lib/safe_fs.py em vez de duplicar a
+# função -- achado omasession-16 (rev-2): a constante já tinha virado um
+# import na rodada 14, mas a função que a usa continuava copiada, idêntica,
+# aqui e em lib/replay.py. OSError já é o que os dois chamadores abaixo
+# tratam como "não dá pra usar isto".
+def _read_capped(path: Path) -> str:
+    return read_capped_path(path).decode()
+
 
 # Names worth spelling out. Everything else is derived from the class, which is
 # better than nothing and never claims more than it knows.
@@ -60,7 +73,7 @@ def resolvable_map(toml_path: Path) -> dict[tuple[str, object], int]:
     """
     counts: dict[tuple[str, object], int] = {}
     try:
-        doc = tomllib.loads(toml_path.read_text())
+        doc = tomllib.loads(_read_capped(toml_path))
     except (OSError, tomllib.TOMLDecodeError):
         return counts
     for w in doc.get("window", []):
@@ -75,7 +88,7 @@ def main() -> int:
     path = Path(sys.argv[1])
     toml_path = Path(sys.argv[2]) if len(sys.argv) > 2 else None
     try:
-        windows = json.loads(path.read_text()).get("windows", [])
+        windows = json.loads(_read_capped(path)).get("windows", [])
     except (OSError, json.JSONDecodeError):
         json.dump([], sys.stdout)
         return 0

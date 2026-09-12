@@ -42,6 +42,13 @@ set -euo pipefail
 # segurança do marketplace (issue #6243, refinado na rodada omasession-12).
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
 
+# A pinned list is only as trustworthy as the directories in it -- achado da
+# revisão (issue #6243, retorno do HANCORE-linux). /usr/bin/python3 é fixo
+# de propósito: este é o script que prova que o PATH é confiável, não pode
+# confiar nele ainda pra se encontrar.
+/usr/bin/python3 "${BASH_SOURCE[0]%/*}/verify_path.py" \
+    || { printf 'session-save: %s\n' "PATH contains an untrusted directory -- refusing to run" >&2; exit 1; }
+
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 if [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then
     HYPRLAND_INSTANCE_SIGNATURE="$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)"
@@ -62,11 +69,51 @@ say() { printf 'session-save: %s\n' "$*"; }
 die() { printf 'session-save: %s\n' "$*" >&2; exit 1; }
 err() { printf 'session-save: %s\n' "$*" >&2; }
 
-mkdir -p "$SESSION_DIR"
+# A única entrada externa que decide onde o lock e a sessão inteira moram --
+# achado da revisão (omasession-18, rev-2): a exceção de sticky bit em
+# safe_fs.py (legítima para um /tmp de passagem, tolerado como ancestral)
+# reabre a janela de corrida do lock file (touch_safe -> exec 9>, ver
+# abaixo) se SESSION_DIR apontar DIRETO pra um diretório sticky
+# world-writable -- algo que só um valor fora de $HOME alcançaria, nunca
+# documentado nem testado. Recusar isso aqui fecha a única precondição
+# alcançável, sem tocar na decisão maior de não reengenheirar a aquisição
+# do lock.
+case "$SESSION_DIR" in
+    "$HOME"/*) ;;
+    *) die "OMASESSION_SESSION_DIR must be inside \$HOME (got: $SESSION_DIR)" ;;
+esac
+
+# Verifica a cadeia inteira até SESSION_DIR (cada componente a partir de "/",
+# sem seguir symlink, dono root-ou-nós) antes de qualquer coisa tocar nela --
+# achado da revisão de segurança do marketplace (issue #6243, retorno do
+# HANCORE-linux): "created/read/... without owned no-follow ancestry
+# verification". O resto deste arquivo continua escrevendo por caminho
+# dentro de SESSION_DIR (staging + rename), o que já é seguro contra um
+# symlink plantado exatamente no NOME final -- rename(2) troca a entrada do
+# diretório, nunca segue o que ela apontava (mesma propriedade que
+# lib/browser_policy.py usa e este projeto já mediu). O que faltava
+# especificamente era provar que nenhum ANCESTRAL da própria SESSION_DIR foi
+# trocado por symlink antes de tudo isso começar -- é só isso que esta
+# checagem fecha, sem reescrever a lógica de staging já testada 25/25 em
+# test/guard-cases.sh.
+python3 "${BASH_SOURCE[0]%/*}/safe_fs.py" verify --create "$SESSION_DIR" \
+    || die "refusing to use $SESSION_DIR -- see the safe_fs: line above for why"
 
 # One save at a time. The snapshot timer fires every 30s by default and a slow
 # hyprctl is enough to overlap two runs; two captures racing on the same file
 # is a way to produce exactly the truncated toml this guard exists to catch.
+#
+# `exec N>path` a seguir é o próprio bash abrindo por nome -- ao contrário de
+# tudo mais neste projeto, não tem um O_NOFOLLOW equivalente, e SEGUE um
+# symlink plantado nesse nome, truncando o que quer que ele aponte. `touch`
+# do safe_fs.py garante, um instante antes, que o nome é um arquivo de
+# verdade (recusa se for symlink) sem truncar um lock que já existe de uma
+# execução anterior -- o normal aqui, já que nada apaga esse arquivo depois
+# de usado. Sobra uma janela entre este touch e o `exec` logo abaixo, mas é a
+# mesma janela de poucas instruções já aceita para SESSION_DIR acima, não a
+# exposição de antes (aberta por toda a vida do arquivo).
+python3 "${BASH_SOURCE[0]%/*}/safe_fs.py" touch "$SESSION_DIR" ".$NAME.lock" \
+    || die "refusing to use .$NAME.lock -- see the safe_fs: line above for why"
 exec 9>"$SESSION_DIR/.$NAME.lock"
 if ! flock -n 9; then
     err "another save is already running -- skipping this tick"
@@ -133,6 +180,7 @@ esac
 STAGING="omasession.staging.$NAME.$$"
 STAGING_TOML="$SESSION_DIR/$STAGING.toml"
 STAGING_SIDECAR="$SESSION_DIR/$STAGING.titles.json"
+SAFE_FS_SS="${BASH_SOURCE[0]%/*}/safe_fs.py"
 
 cleanup() {
     rm -f "$STAGING_TOML" "$STAGING_TOML.raw" "$STAGING_SIDECAR" "$STAGING_SIDECAR.raw" \
@@ -211,7 +259,11 @@ if ! timeout --kill-after=5 30 python3 "$CAPTURE" "$NAME" <<<"$clients" > "$STAG
     exit 3
 fi
 rm -f "$capture_err"
-mv -f "$STAGING_TOML.raw" "$STAGING_TOML"
+# Nome com o pid deste processo, não fixo -- risco bem mais baixo que os
+# renames finais (um atacante teria de adivinhar o pid futuro pra pré-plantar
+# um symlink), mas a mesma correção custa pouco a mais aqui: fechado junto.
+python3 "$SAFE_FS_SS" rename "$SESSION_DIR" "$STAGING.toml.raw" "$STAGING.toml" \
+    || die "could not stage the captured session"
 
 # Cru, de propósito -- não é a mesma pergunta que "quantas janelas têm
 # launch_cmd". A primeira versão desta correção contava só as com comando, e a
@@ -305,7 +357,8 @@ jq --arg when "$(date -u +%FT%TZ)" --arg gen "$GENERATION" \
 # por que ele não é recuperável. Depois do reboot isso não existe em lugar
 # nenhum.
 timeout --kill-after=5 30 python3 "$(dirname "${BASH_SOURCE[0]}")/annotate.py" "$STAGING_SIDECAR.raw" > "$STAGING_SIDECAR" \
-    2>/dev/null || mv -f "$STAGING_SIDECAR.raw" "$STAGING_SIDECAR"
+    2>/dev/null || python3 "$SAFE_FS_SS" rename "$SESSION_DIR" "$STAGING.titles.json.raw" "$STAGING.titles.json" \
+        || die "could not stage the sidecar"
 rm -f "$STAGING_SIDECAR.raw"
 
 # Durabilidade não é atomicidade, e o rename só garante a segunda. capture.py
@@ -344,22 +397,37 @@ pair_is_whole() {
     [[ "$gt" == "$gs" ]]
 }
 
+# cp -p seguiria um symlink plantado em $NAME.prev.* (ao contrário de
+# rename(), copy segue o destino) -- achado de quando o usuário pediu pra
+# fechar todos os pontos que sobraram da revisão do HANCORE-linux. Mesmos
+# nomes relativos a SESSION_DIR que o resto do arquivo já usa por caminho
+# absoluto; safe_fs.py é quem abre por descritor a partir daqui.
 if pair_is_whole "$TOML"; then
-    cp -p "$TOML" "$SESSION_DIR/$NAME.prev.toml"
-    cp -p "$SIDECAR" "$SESSION_DIR/$NAME.prev.titles.json"
+    python3 "$SAFE_FS_SS" copy "$SESSION_DIR" "$NAME.toml" "$NAME.prev.toml" \
+        || die "could not back up $TOML to .prev"
+    python3 "$SAFE_FS_SS" copy "$SESSION_DIR" "$NAME.titles.json" "$NAME.prev.titles.json" \
+        || die "could not back up $SIDECAR to .prev"
     sync_path "$SESSION_DIR/$NAME.prev.toml" || true
     sync_path "$SESSION_DIR/$NAME.prev.titles.json" || true
 elif [[ -f "$TOML" ]]; then
     err "the session being replaced is not a whole pair -- keeping the older fallback"
 fi
 
-mv -f "$STAGING_TOML" "$TOML"
+# mv sem -T aninha dentro de um destino que for (ou apontar para) um
+# diretório em vez de substituir o nome -- reproduzido ao vivo com o mv real
+# desta máquina, a mesma classe de bug já achada e corrigida no
+# lib/browser_policy.py. safe_fs.py's rename usa os.rename() com dir_fd dos
+# dois lados, que troca a entrada do diretório sem nunca seguir o que ela
+# apontava.
+python3 "$SAFE_FS_SS" rename "$SESSION_DIR" "$STAGING.toml" "$NAME.toml" \
+    || die "could not publish $TOML"
 # Ponto de pausa determinístico: a janela entre os dois renames dura
 # microssegundos, e um kill em instante aleatório praticamente nunca cai nela.
 # Sem isto o caminho do par rasgado não é testável, e um caminho não testado é
 # uma afirmação, não uma garantia.
 [[ -n "${OMASESSION_TEST_PAUSE_BETWEEN_MV:-}" ]] && sleep "$OMASESSION_TEST_PAUSE_BETWEEN_MV"
-mv -f "$STAGING_SIDECAR" "$SIDECAR"
+python3 "$SAFE_FS_SS" rename "$SESSION_DIR" "$STAGING.titles.json" "$NAME.titles.json" \
+    || die "could not publish $SIDECAR"
 sync_path "$SESSION_DIR" || err "published, but the directory flush failed -- durability uncertain"
 
 extra=""

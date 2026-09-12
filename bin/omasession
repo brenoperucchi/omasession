@@ -36,7 +36,18 @@ set -euo pipefail
 # que este pin existe pra evitar do lado oposto.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
 
-SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A pinned list is only as trustworthy as the directories in it -- achado da
+# revisão (issue #6243, retorno do HANCORE-linux): confia que /usr/local/*
+# continua root-owned e não-gravável por padrão, sem nunca ter conferido.
+# /usr/bin/python3 é fixo aqui de propósito -- este é o próprio script que
+# prova que o PATH é confiável, então não pode confiar nele ainda pra se
+# encontrar.
+/usr/bin/python3 "${BASH_SOURCE[0]%/*}/../lib/verify_path.py" \
+    || { printf 'omasession: %s\n' "PATH contains an untrusted directory -- refusing to run" >&2; exit 1; }
+
+# SELF via expansão de parâmetro, não `dirname`/`readlink`: evita depender de
+# um comando externo antes do PATH estar fixado e verificado.
+SELF="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
 LIB="$SELF/lib"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omasession"
@@ -48,7 +59,64 @@ SAVE_STATE="$STATE_DIR/last-save.json"
 SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/omasession/sessions}"
 
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/autostart.lua"
+AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+AUTOSTART_NAME="autostart.lua"
+AUTOSTART="$AUTOSTART_DIR/$AUTOSTART_NAME"
+
+# Toda leitura/escrita de config.json, last-save.json e autostart.lua passa
+# por aqui -- não por `> "$path"`/`cp`/`mv` direto. lib/safe_fs.py abre cada
+# componente do caminho com O_NOFOLLOW a partir de "/", nunca reabrindo por
+# string depois de checar; o achado original (issue #6243) era sobre o
+# browser-setup, que roda como root, mas o revisor manteve isto bloqueando
+# mesmo depois desse fix -- esta categoria nunca atravessa fronteira de
+# privilégio (quem já tem acesso de escrita no $HOME do usuário já pode
+# fazer qualquer coisa que o próprio usuário faz), mas o mesmo padrão foi
+# aplicado aqui a pedido do revisor.
+SAFE_FS="$LIB/safe_fs.py"
+safe_read() { python3 "$SAFE_FS" read "$1" "$2" 2>/dev/null; }
+safe_write() { python3 "$SAFE_FS" write --create "$1" "$2" "${3:-600}"; }
+safe_copy()  { python3 "$SAFE_FS" copy --create "$1" "$2" "$3" 2>/dev/null; }
+
+# safe_read sai com 3 quando o arquivo/diretório simplesmente não existe
+# ainda (instalação nova, nenhuma sessão salva ainda) e com 1 pra qualquer
+# outra coisa (symlink recusado na cadeia, arquivo maior que o teto). Todo
+# call site abaixo precisa das DUAS partes: capturar sem deixar o `set -e`
+# abortar a atribuição (achado omasession-14 -- `local x; x="$(safe_read
+# ...)"` como duas declarações é uma atribuição simples, e sob `set -e` uma
+# falha ali mata o script antes mesmo do `[[ -z/-n ]]` que já tratava o caso
+# como normal), E distinguir os dois códigos (achado omasession-14/15 rev-2
+# -- colapsar tudo em string vazia faz uma recusa de segurança de verdade
+# desaparecer em silêncio, e um arquivo que existe mas está vazio de verdade
+# virar indistinguível de "não existe"). O idioma:
+#
+#   local x rc; x="$(safe_read "$dir" "$name")" && rc=0 || rc=$?
+#   (( rc == 0 || rc == 3 )) || safe_read_die "$rc" "$path"
+#
+# `x="$(cmd)" && rc=0 || rc=$?` nunca deixa o `set -e` dessa linha disparar
+# (o `||`/`&&` externo sempre resolve pra sucesso), mas ainda captura o
+# código real de `cmd` em `rc` -- ao contrário de `x="$(cmd)" || rc=$?`
+# sozinho, que deixaria `rc` sem valor no caminho de sucesso.
+#
+# autostart.lua tem uma exigência a mais: o ciclo install/uninstall precisa
+# devolver o arquivo idêntico (comentário em remove_login_restore), e
+# `$(safe_read ...)` come toda newline final do jeito que `$(...)` sempre
+# faz -- inofensivo pra config.json/last-save.json (sempre regenerados do
+# zero por jq), não pra um arquivo editado à mão que este script só
+# acrescenta/remove um trecho marcado. O sentinela `X` protege as newlines
+# reais (que deixam de ser as últimas do stream) contra ESSE `$(...)`
+# interno -- mas não contra outro por cima. A primeira versão disto devolvia
+# o conteúdo por `printf` e deixava quem chama fazer `content="$(safe_read_
+# exact ...)"`, e essa segunda captura comia a newline de novo, do mesmo
+# jeito -- achado omasession-16 (rev-2, medido com od -c): a proteção nunca
+# saía da própria função. `printf -v` na variável do CHAMADOR (via nameref)
+# em vez de stdout+`$(...)` evita ter uma segunda camada pra proteger.
+safe_read_exact_into() { # safe_read_exact_into <var> <dir> <name>
+    local -n _dst="$1"
+    local out rc
+    out="$(safe_read "$2" "$3"; rc=$?; printf X; exit "$rc")" && rc=0 || rc=$?
+    printf -v _dst '%s' "${out%X}"
+    return "$rc"
+}
 
 toml_windows() {
     [[ -f "$1" ]] || { echo 0; return; }
@@ -63,6 +131,31 @@ say()  { printf 'omasession: %s\n' "$*"; }
 err()  { printf 'omasession: %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# safe_read_die <rc> <path> -- morre com uma mensagem que reflete o motivo
+# de verdade, não uma frase genérica só -- achado omasession-17 (rev-2):
+# lib/safe_fs.py agora sai com códigos distintos (1 recusa de confiança de
+# verdade, 4 arquivo maior que o teto, 5 outro erro de I/O), mas toda
+# chamada aqui ainda dizia "failed the directory-chain trust check" pros
+# três, então um config.json de 9 MiB e um symlink recusado produziam a
+# mesma mensagem, nenhuma das duas certa pro caso de tamanho.
+safe_read_die() {
+    case "$1" in
+        4) die "refusing $2: larger than the size limit" ;;
+        1) die "refusing $2: failed the directory-chain trust check (wrong owner, writable by others, or an untrusted symlink)" ;;
+        *) die "refusing $2: unexpected error reading it (rc=$1)" ;;
+    esac
+}
+
+# Mesma checagem de lib/session-save.sh, mesmo motivo (achado omasession-18,
+# rev-2): OMASESSION_SESSION_DIR fora de $HOME nunca foi documentado nem
+# testado, e reabriria a exceção de sticky bit do safe_fs.py como precondição
+# alcançável pra corrida no lock file do save. Recusado aqui também, não só
+# no save, pra falhar cedo em qualquer subcomando que use SESSION_DIR.
+case "$SESSION_DIR" in
+    "$HOME"/*) ;;
+    *) die "OMASESSION_SESSION_DIR must be inside \$HOME (got: $SESSION_DIR)" ;;
+esac
+
 # ── configuration ────────────────────────────────────────────────────────────
 # The manifest declares these under barWidget.schema, which is the quickshell
 # preference store -- unreachable from a systemd timer or from a login-time
@@ -73,15 +166,33 @@ DEFAULT_SAVE_INTERVAL=30
 DEFAULT_RESTORE_ON_LOGIN=true
 DEFAULT_BROWSER_RESTORE=true
 
-config_get() { # config_get <key> <default>
-    [[ -f "$CONFIG" ]] || { printf '%s' "$2"; return; }
+config_get() { # config_get <key> <default> [raw_json]
+    # $3, quando dado, poupa uma leitura de config.json que quem chama já fez
+    # -- achado omasession-15 (P3, custo): status_json chamava isto duas
+    # vezes, cada uma relendo o arquivo do zero com seu próprio processo
+    # python3, medido em ~54ms extras por chamada de status --json. Mesma
+    # ideia já usada logo abaixo pra save_state: ler uma vez, extrair várias
+    # chaves da mesma string.
+    local raw
+    if (( $# >= 3 )); then
+        raw="$3"
+    else
+        local rc; raw="$(safe_read "$CONFIG_DIR" config.json)" && rc=0 || rc=$?
+        # rc==4 (grande demais) degrada pro default aqui de propósito,
+        # diferente de cmd_install/cmd_config-set abaixo -- achado
+        # omasession-17 (rev-2): esta função só LÊ um valor pra exibir ou
+        # decidir comportamento, nunca escreve; travar o comando inteiro
+        # porque o arquivo é grande demais é pior que mostrar o default.
+        (( rc == 0 || rc == 3 || rc == 4 )) || safe_read_die "$rc" "$CONFIG"
+    fi
+    [[ -n "$raw" ]] || { printf '%s' "$2"; return; }
     local v
     # `// empty` trata false como ausente, então `restoreOnLogin: false` caía no
     # default `true` e o install adicionava a linha de login mesmo assim -- uma
     # opção que o usuário desligou e o programa ignorou em silêncio. `has` é o
     # que distingue chave ausente de valor falso.
     v="$(jq -r --arg k "$1" 'if has($k) and .[$k] != null then .[$k] else empty end' \
-         "$CONFIG" 2>/dev/null)" || v=""
+         <<<"$raw" 2>/dev/null)" || v=""
     [[ -n "$v" ]] && printf '%s' "$v" || printf '%s' "$2"
 }
 
@@ -98,7 +209,6 @@ hypr_env() {
 # ── save ─────────────────────────────────────────────────────────────────────
 cmd_save() {
     local name="${1:-last}" out rc
-    mkdir -p "$STATE_DIR"
     set +e
     out="$("$LIB/session-save.sh" "$name" 2>&1)"; rc=$?
     set -e
@@ -108,11 +218,18 @@ cmd_save() {
     # in the journal. A guard that protects the session silently looks exactly
     # like a guard that never ran.
     local windows; windows="$(toml_windows "$SESSION_DIR/$name.toml")"
-    jq -n --arg when "$(date -u +%FT%TZ)" --argjson rc "$rc" \
+    # Mesmo cuidado do cmd_config: monta antes de publicar, pra um jq -n que
+    # falhasse (não deveria, os args são todos nossos, mas o -- "|| true"
+    # abaixo existe justamente pra nunca deixar a contabilidade derrubar o
+    # rc do save de verdade) não conseguir publicar um last-save.json vazio
+    # por cima do anterior.
+    local record
+    if record="$(jq -n --arg when "$(date -u +%FT%TZ)" --argjson rc "$rc" \
           --arg message "$(printf '%s' "$out" | tail -1)" \
           --argjson windows "$windows" --arg name "$name" \
-          '{when:$when, rc:$rc, message:$message, windows:$windows, name:$name}' \
-        > "$SAVE_STATE.tmp" && mv -f "$SAVE_STATE.tmp" "$SAVE_STATE"
+          '{when:$when, rc:$rc, message:$message, windows:$windows, name:$name}')"; then
+        printf '%s\n' "$record" | safe_write "$STATE_DIR" last-save.json || true
+    fi
     return $rc
 }
 
@@ -201,16 +318,31 @@ status_json() {
     fi
 
     local rc=0 message="" when=""
-    if [[ -f "$SAVE_STATE" ]]; then
-        rc="$(jq -r '.rc // 0' "$SAVE_STATE" 2>/dev/null || echo 0)"
-        message="$(jq -r '.message // ""' "$SAVE_STATE" 2>/dev/null || echo "")"
-        when="$(jq -r '.when // ""' "$SAVE_STATE" 2>/dev/null || echo "")"
+    # read_rc, não rc -- "rc" abaixo é o exit code que o ÚLTIMO SAVE reportou
+    # (lido de dentro do save_state), um valor de domínio completamente
+    # diferente do exit code desta leitura. Reusar o mesmo nome faria uma
+    # instalação nova (save_state ausente, read_rc=3) ser lida como "o save
+    # recusou" (rc==3 é exatamente o que session-save.sh usa pra "refused"),
+    # marcando `refused=true` sem nunca ter havido save nenhum -- um bug de
+    # verdade que só apareceu ao escrever este comentário.
+    local save_state read_rc; save_state="$(safe_read "$STATE_DIR" last-save.json)" && read_rc=0 || read_rc=$?
+    # rc==4 aceito aqui também -- status_json só exibe, nunca escreve.
+    (( read_rc == 0 || read_rc == 3 || read_rc == 4 )) || safe_read_die "$read_rc" "$SAVE_STATE"
+    if [[ -n "$save_state" ]]; then
+        rc="$(jq -r '.rc // 0' <<<"$save_state" 2>/dev/null || echo 0)"
+        message="$(jq -r '.message // ""' <<<"$save_state" 2>/dev/null || echo "")"
+        when="$(jq -r '.when // ""' <<<"$save_state" 2>/dev/null || echo "")"
     fi
     local refused=false
     [[ "$rc" == "3" ]] && refused=true
 
     local timer="inactive"
     systemctl --user is-active --quiet omasession-snapshot.timer 2>/dev/null && timer="active"
+
+    local cfg_raw cfg_rc
+    cfg_raw="$(safe_read "$CONFIG_DIR" config.json)" && cfg_rc=0 || cfg_rc=$?
+    # rc==4 aceito aqui também, mesmo motivo do save_state acima.
+    (( cfg_rc == 0 || cfg_rc == 3 || cfg_rc == 4 )) || safe_read_die "$cfg_rc" "$CONFIG"
 
     jq -n \
         --argjson windows "$windows" \
@@ -224,8 +356,8 @@ status_json() {
         --argjson fallback "$fallback" \
         --argjson notes "$notes" \
         --argjson workspaces "${workspaces:-0}" \
-        --argjson intervalSec "$(config_get saveIntervalSec "$DEFAULT_SAVE_INTERVAL")" \
-        --argjson restoreOnLogin "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" \
+        --argjson intervalSec "$(config_get saveIntervalSec "$DEFAULT_SAVE_INTERVAL" "$cfg_raw")" \
+        --argjson restoreOnLogin "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN" "$cfg_raw")" \
         '{windows:$windows, workspaces:$workspaces, agoSec:$agoSec,
           refused:$refused, detail:$detail,
           captured:$captured, lastSave:$lastSave, timer:$timer,
@@ -278,8 +410,14 @@ cmd_resolve() {
     local json=0
     [[ "${1:-}" == "--json" ]] && json=1
 
+    # As duas metades do pipeline com o próprio timeout -- achado da revisão
+    # de segurança do marketplace (issue #6243, retorno do HANCORE-linux):
+    # `timeout` só na primeira metade limita quando o hyprctl trava, não
+    # quando o consumidor (resolve_cli.py, que por sua vez pode chamar tmux
+    # por janela) trava.
     local out
-    out="$(timeout --kill-after=5 15 hyprctl clients -j | python3 "$LIB/resolve_cli.py")" || die "resolve failed"
+    out="$(timeout --kill-after=5 15 hyprctl clients -j \
+        | timeout --kill-after=5 30 python3 "$LIB/resolve_cli.py")" || die "resolve failed"
     if (( json )); then printf '%s\n' "$out"; return; fi
 
     jq -r '.[] | "  \(.via | . + (" " * (10 - length)))  \(.class)"
@@ -363,47 +501,94 @@ MARK_LOGIN="-- OmaSession: reopen the last session at login"
 LEGACY_MARK_DISARM="-- omasession: disarmed, see docs/DESIGN.md §2 -- "
 
 rearm_legacy_hyprresume() {
-    [[ -f "$AUTOSTART" ]] || return 0
-    grep -qF -- "$LEGACY_MARK_DISARM" "$AUTOSTART" || return 0
-    local tmp; tmp="$(mktemp "$AUTOSTART.XXXXXX")"
-    sed "s|^${LEGACY_MARK_DISARM}||" "$AUTOSTART" > "$tmp" && mv -f "$tmp" "$AUTOSTART"
+    local content rc
+    safe_read_exact_into content "$AUTOSTART_DIR" "$AUTOSTART_NAME" && rc=0 || rc=$?
+    (( rc == 0 || rc == 3 )) || safe_read_die "$rc" "$AUTOSTART"
+    (( rc == 3 )) && return 0
+    grep -qF -- "$LEGACY_MARK_DISARM" <<<"$content" || return 0
+    # Monta antes de publicar, mesma forma dos outros 5 pontos equivalentes
+    # -- achado omasession-15: este era o único que ainda fazia pipe direto
+    # pro safe_write. sed com padrão fixo não falha em texto arbitrário, então
+    # o risco real de publicar algo incompleto aqui sempre foi baixo; fechado
+    # mesmo assim, por consistência de forma, não por um caso reproduzido.
+    local transformed
+    transformed="$(sed "s|^${LEGACY_MARK_DISARM}||" <<<"$content")" || die "could not re-arm $AUTOSTART"
+    printf '%s\n' "$transformed" | safe_write "$AUTOSTART_DIR" "$AUTOSTART_NAME" 644
     say "hyprresume re-armed in autostart.lua (leftover from an older install)"
 }
 
 backup_autostart() {
-    [[ -f "$AUTOSTART" ]] || return 0
+    local content rc
+    safe_read_exact_into content "$AUTOSTART_DIR" "$AUTOSTART_NAME" && rc=0 || rc=$?
+    (( rc == 0 || rc == 3 )) || safe_read_die "$rc" "$AUTOSTART"
+    (( rc == 3 )) && return 0
     # Preservado para recuperação manual, nunca aplicado automaticamente.
-    [[ -f "$AUTOSTART.omasession.bak" ]] || cp -p "$AUTOSTART" "$AUTOSTART.omasession.bak"
+    # Checa EXISTÊNCIA do backup, não conteúdo -- achado das rodadas 14/15:
+    # tratar um backup vazio como "não existe" o sobrescreveria.
+    local bak_rc
+    safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME.omasession.bak" >/dev/null && bak_rc=0 || bak_rc=$?
+    if (( bak_rc == 0 )); then
+        return 0   # backup já existe -- nunca sobrescrever
+    elif (( bak_rc != 3 )); then
+        safe_read_die "$bak_rc" "$AUTOSTART.omasession.bak"
+    fi
+    safe_copy "$AUTOSTART_DIR" "$AUTOSTART_NAME" "$AUTOSTART_NAME.omasession.bak"
 }
 
 add_login_restore() {
-    [[ -f "$AUTOSTART" ]] || { err "no $AUTOSTART -- skipping login restore"; return; }
-    if grep -qF "omasession restore" "$AUTOSTART"; then
+    local content rc
+    safe_read_exact_into content "$AUTOSTART_DIR" "$AUTOSTART_NAME" && rc=0 || rc=$?
+    (( rc == 0 || rc == 3 )) || safe_read_die "$rc" "$AUTOSTART"
+    (( rc == 3 )) && { err "no $AUTOSTART -- skipping login restore"; return; }
+    if grep -qF "omasession restore" <<<"$content"; then
         say "login restore already in autostart.lua"
         return
     fi
     backup_autostart
-    printf '\n%s\n%s\n' "$MARK_LOGIN" "$(autostart_line)" >> "$AUTOSTART"
+    # printf '%s' sem \n -- $content já carrega a newline final que o arquivo
+    # original tinha, preservada por safe_read_exact_into; um \n sintético
+    # aqui duplicaria a quebra de linha a cada install (achado das rodadas
+    # 14/15: o round-trip install/uninstall parou de devolver o arquivo
+    # idêntico). A PRIMEIRA versão de safe_read_exact não preservava de
+    # verdade -- protegia a newline só dentro de si mesma, e a atribuição
+    # `content="$(safe_read_exact ...)"` comia de novo, um nível acima
+    # (achado omasession-16 rev-2, medido com od -c: a linha em branco
+    # separadora que este comentário promete estava sumindo). Corrigido
+    # trocando por safe_read_exact_into, que escreve na variável do
+    # chamador via `printf -v` em vez de por stdout+`$(...)` -- sem essa
+    # segunda captura, não sobra uma segunda camada pra proteger contra.
+    { printf '%s' "$content"; printf '\n%s\n%s\n' "$MARK_LOGIN" "$(autostart_line)"; } \
+        | safe_write "$AUTOSTART_DIR" "$AUTOSTART_NAME" 644
     say "login restore added to autostart.lua"
 }
 
 remove_login_restore() {
-    [[ -f "$AUTOSTART" ]] || return 0
-    grep -qF "omasession restore" "$AUTOSTART" || return 0
-    local tmp; tmp="$(mktemp "$AUTOSTART.XXXXXX")"
+    local content rc
+    safe_read_exact_into content "$AUTOSTART_DIR" "$AUTOSTART_NAME" && rc=0 || rc=$?
+    (( rc == 0 || rc == 3 )) || safe_read_die "$rc" "$AUTOSTART"
+    (( rc == 3 )) && return 0
+    grep -qF "omasession restore" <<<"$content" || return 0
     # Remove a linha marcada e a nossa logo abaixo, e nada mais.
     # Segura uma linha em branco antes de imprimir: o install insere uma antes
     # do marcador, e deixá-la para trás faz o ciclo install/uninstall não
     # devolver o arquivo idêntico -- o que estraga a única checagem barata de
-    # que o desfazer está completo.
-    awk -v mark="$MARK_LOGIN" '
+    # que o desfazer está completo. Testado byte a byte pro caso real (arquivo
+    # terminado numa única newline, o que install/safe_read_exact preservam
+    # corretamente); um arquivo já editado à mão com VÁRIAS linhas em branco
+    # seguidas no final ainda perde as extras aqui -- o `held`/`heldline`
+    # abaixo só carrega uma de cada vez, comportamento anterior a esta rodada,
+    # não uma regressão dela, e não corrigido por ser um caso raro e por não
+    # afetar a validade do arquivo.
+    local new_content
+    new_content="$(awk -v mark="$MARK_LOGIN" '
         $0 == mark            { held = 0; skip = 1; next }
         skip && /omasession restore/ { skip = 0; next }
         /^[[:space:]]*$/      { if (held) print heldline; heldline = $0; held = 1; next }
                               { if (held) { print heldline; held = 0 } skip = 0; print }
         END                   { if (held) print heldline }
-    ' "$AUTOSTART" > "$tmp" && mv -f "$tmp" "$AUTOSTART"
-    if grep -qF "omasession restore" "$AUTOSTART"; then
+    ' <<<"$content")"
+    printf '%s\n' "$new_content" | safe_write "$AUTOSTART_DIR" "$AUTOSTART_NAME" 644
+    if grep -qF "omasession restore" <<<"$new_content"; then
         err "an omasession line in autostart.lua was not written by install and was left alone"
     else
         say "login restore removed from autostart.lua"
@@ -515,13 +700,28 @@ cmd_install() {
     command -v jq >/dev/null || die "jq is required"
     command -v python3 >/dev/null || die "python3 is required"
 
-    mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$SESSION_DIR"
+    mkdir -p "$SESSION_DIR"
     migrate_legacy_session
-    if [[ ! -f "$CONFIG" ]]; then
-        jq -n --argjson i "$DEFAULT_SAVE_INTERVAL" \
+    # rc, não só string vazia -- achado omasession-16 (rev-1): um config.json
+    # de verdade, maior que o teto de 8 MiB, também lê como string vazia
+    # (rc=1, recusado -- não rc=3, ausente), e a versão anterior escrevia os
+    # defaults por cima dele do mesmo jeito que faria numa instalação nova,
+    # apagando uma configuração real por engano.
+    local cfg_rc
+    safe_read "$CONFIG_DIR" config.json >/dev/null && cfg_rc=0 || cfg_rc=$?
+    (( cfg_rc == 0 || cfg_rc == 3 )) || safe_read_die "$cfg_rc" "$CONFIG"
+    if (( cfg_rc == 3 )); then
+        # Monta antes de publicar, mesma razão do cmd_config/cmd_save -- acha-
+        # do da revisão (omasession-15): esta era a mesma forma exata (jq -n
+        # ... | safe_write) que já tinha sido corrigida nos outros dois
+        # pontos e ficou de fora por inconsistência, não por avaliação.
+        local defaults
+        defaults="$(jq -n --argjson i "$DEFAULT_SAVE_INTERVAL" \
               --argjson r "$DEFAULT_RESTORE_ON_LOGIN" \
               --argjson b "$DEFAULT_BROWSER_RESTORE" \
-              '{saveIntervalSec:$i, restoreOnLogin:$r, browserRestore:$b}' > "$CONFIG"
+              '{saveIntervalSec:$i, restoreOnLogin:$r, browserRestore:$b}')" \
+            || die "could not build default config"
+        printf '%s\n' "$defaults" | safe_write "$CONFIG_DIR" config.json
         say "config written to $CONFIG"
     fi
 
@@ -563,7 +763,7 @@ cmd_install() {
     # hyprresume ficava com a linha comentada enquanto o OmaSession estivesse
     # instalado, sem nenhuma indicação de que essa alteração ainda existe ou
     # de que este install já não a faz mais.
-    if [[ -f "$AUTOSTART" ]] && grep -qF -- "$LEGACY_MARK_DISARM" "$AUTOSTART"; then
+    if grep -qF -- "$LEGACY_MARK_DISARM" <<<"$(safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME")"; then
         say "note: hyprresume is still disarmed in autostart.lua from an older install -- this version no longer does that, but won't undo it either; 'omasession uninstall' will"
     fi
     say "installed"
@@ -577,7 +777,7 @@ cmd_uninstall() {
     # que o usuário editou depois do install -- P0 da rodada 2.
     remove_login_restore
     rearm_legacy_hyprresume
-    if [[ -f "$AUTOSTART.omasession.bak" ]]; then
+    if [[ -n "$(safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME.omasession.bak")" ]]; then
         say "backup kept at $(basename "$AUTOSTART").omasession.bak (not applied)"
     fi
     # browser-setup escreve política root, fora de qualquer diretório que
@@ -619,8 +819,19 @@ cmd_config() {
         set)
             local key="${2:?usage: omasession config set <key> <value>}"
             local value="${3:?usage: omasession config set <key> <value>}"
-            mkdir -p "$CONFIG_DIR"
-            [[ -f "$CONFIG" ]] || echo '{}' > "$CONFIG"
+            local current rc
+            current="$(safe_read "$CONFIG_DIR" config.json)" && rc=0 || rc=$?
+            (( rc == 0 || rc == 3 )) || safe_read_die "$rc" "$CONFIG"
+            if (( rc == 3 )); then
+                current='{}'
+            else
+                # Falhar cedo e com a causa certa -- achado da revisão
+                # (omasession-15): sem isto, um config.json corrompido fazia
+                # o merge do jq abaixo falhar e a mensagem culpava "$value",
+                # que nunca teve nada de errado.
+                jq -e . >/dev/null 2>&1 <<<"$current" \
+                    || die "config.json does not parse -- fix or delete $CONFIG"
+            fi
             # true/false/numbers stay bare JSON; anything else is a JSON string.
             # A key that does not already round-trip through jq is rejected
             # rather than written half-typed.
@@ -629,8 +840,17 @@ cmd_config() {
                 true|false|[0-9]*) typed="$value" ;;
                 *) typed="$(jq -Rn --arg v "$value" '$v')" ;;
             esac
-            jq --arg k "$key" --argjson v "$typed" '.[$k] = $v' "$CONFIG" \
-                > "$CONFIG.tmp" && mv -f "$CONFIG.tmp" "$CONFIG"
+            # Monta o documento inteiro numa variável antes de publicar --
+            # achado da revisão (omasession-14): `jq ... | safe_write ...`
+            # direto deixa safe_write publicar o que quer que tenha chegado
+            # no stdin, mesmo vazio, antes de o próprio bash notar que o jq
+            # falhou (pipefail só reage DEPOIS que o pipe inteiro já correu).
+            # Reproduzido: um config.json corrompido fazia jq falhar com
+            # rc=5 e ainda assim sobrescrevia o arquivo com zero bytes.
+            local updated
+            updated="$(jq --arg k "$key" --argjson v "$typed" '.[$k] = $v' <<<"$current")" \
+                || die "invalid config value"
+            printf '%s\n' "$updated" | safe_write "$CONFIG_DIR" config.json
             say "$key = $value"
             ;;
         *) die "usage: omasession config get|set <key> [value]" ;;

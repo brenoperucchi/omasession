@@ -33,6 +33,9 @@ import time
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from safe_fs import read_capped_path  # noqa: E402
+
 SESSION = Path.home() / ".local/share/omasession/sessions/last.toml"
 WINDOW_TIMEOUT = 15.0
 BROWSER_TIMEOUT = 40.0
@@ -585,6 +588,18 @@ def sidecar_for(toml: Path) -> Path:
     return Path(str(toml).removesuffix(".toml") + ".titles.json")
 
 
+# Um par com uma metade maior que isto não é uma sessão de verdade -- achado
+# da revisão de segurança do marketplace (issue #6243): esta é exatamente a
+# leitura que alimenta `omasession status --json`, e por extensão o painel
+# QML. Importa read_capped_path de lib/safe_fs.py em vez de duplicar a
+# função -- achado omasession-16 (rev-2): a constante já tinha virado um
+# import na rodada 14, mas a função que a usa continuava copiada, idêntica,
+# aqui e em lib/captured.py. OSError é o que os dois chamadores abaixo já
+# tratam como "esta metade não presta, cai pra geração anterior".
+def _read_capped(path: Path) -> str:
+    return read_capped_path(path).decode()
+
+
 def read_pair(toml: Path) -> dict:
     """Everything needed to judge a pair, without judging it here.
 
@@ -602,7 +617,7 @@ def read_pair(toml: Path) -> dict:
         result["why"] = "no session file"
         return result
     try:
-        doc = tomllib.loads(toml.read_text())
+        doc = tomllib.loads(_read_capped(toml))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         result["why"] = f"session file does not parse: {exc}"
         return result
@@ -616,7 +631,7 @@ def read_pair(toml: Path) -> dict:
         result["why"] = "no title sidecar"
         return result
     try:
-        data = json.loads(side.read_text())
+        data = json.loads(_read_capped(side))
     except (OSError, json.JSONDecodeError) as exc:
         result["state"] = "partial"
         result["why"] = f"sidecar does not parse: {exc}"
