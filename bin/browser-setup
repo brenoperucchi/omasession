@@ -1,41 +1,46 @@
 #!/usr/bin/env bash
-# One-time setup so Chromium-family browsers can restore a session unattended.
-# Belongs in the plugin's install step, not in the restore path: it needs root
-# and it only has to happen once per machine.
+# Where the Chromium-family policy file that suppresses onboarding screens
+# WOULD go for each vendor, one per line -- omasession install/uninstall use
+# this to check whether the manual step documented in the README has been
+# done. This script never writes anything itself, and never needs root.
 #
-# What it fixes: Google Chrome replaces session restore with its onboarding
-# pages ("What's New", default-browser prompt) on the first launch after every
-# version milestone -- and Chrome updates itself. Without this, the first
-# restore after each Chrome update silently loses every browser window.
-# Chromium does not do this, but the policy is harmless there.
-
+# It used to also WRITE that policy, as root, via `--install` (the default)
+# and remove it via `--remove`, calling lib/browser_policy.py and
+# lib/verify_path.py to do it safely -- removed. Achado da revisão de
+# segurança do marketplace (github.com/omacom/omarchy-plugin-marketplace/
+# issues/6243, HANCORE-linux, follow-up de 2026-09-12): não importa quão
+# seguras as escritas em si fossem contra symlink -- e as duas rodadas
+# anteriores as tornaram genuinamente seguras, TOCTOU incluído -- `sudo`
+# carregando este script (e os dois que ele chamava) do checkout git do
+# próprio usuário é uma travessia real de fronteira de privilégio: qualquer
+# processo rodando como esse mesmo usuário (não precisa ser root) podia
+# reescrever esses arquivos antes do humano digitar o `sudo` documentado, e
+# o código substituído rodaria como root. PATH fixo e escrita segura contra
+# symlink nunca resolveram isso, porque nunca autenticavam os BYTES do
+# próprio script.
+#
+# A troca: o README agora documenta dois comandos literais (`install -D -T
+# -m 644` pra escrever, `rm -f` pra desfazer) rodando sobre dado fixo, com
+# `sudo` direto -- nenhum arquivo deste checkout é carregado por root em
+# momento nenhum. Medido: `install -D -T -m 644` tem a mesma propriedade
+# que lib/browser_policy.py existia pra ter -- não segue um symlink
+# plantado no nome final (substitui a entrada, como o `os.rename()` de
+# antes; o `-T` é o que garante isso, sem ele um symlink-para-diretório
+# nesse nome faz o `install` copiar PRA DENTRO dele em vez de substituir,
+# achado da revisão), e cria o diretório que falta com o mesmo modo (0755)
+# que o helper Python usava, imune ao umask de quem roda o sudo.
+#
+# Resíduo conhecido, não fechado de propósito: `install -D` ainda segue um
+# symlink plantado num componente de DIRETÓRIO no meio do caminho (não no
+# nome final) -- diferente do que O_NOFOLLOW por componente garantia. Não
+# é regressão prática: todo componente de `/etc` pra baixo é normalmente
+# root-owned 0755 num sistema são, então alcançar esse resíduo já exige
+# ser root (ou um pacote do sistema quebrado) -- exatamente o privilégio
+# que o achado desta rodada existia pra não precisar ter de antemão.
+# Fechar isso reintroduziria lógica condicional do checkout rodando como
+# root, o problema oposto do que esta mudança resolve.
 set -euo pipefail
 
-# Nunca confiar no PATH herdado. Este script roda como root (sudo), o que
-# torna um binário shadowed ainda mais grave aqui do que num processo de
-# usuário -- achado da revisão de segurança do marketplace (issue #6243).
-# /usr/local/{s,}bin entram também: ainda são root-owned num sistema padrão
-# (não carregam o risco que motivou o pin -- shims de mise/asdf, ~/.local/bin,
-# Homebrew), e é onde um Hyprland compilado da fonte (`make install`) instala
-# `hyprctl` por padrão -- um PATH estreito demais faz o script inteiro parar
-# de achar navegadores/binários legítimos em silêncio, achado da revisão.
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
-
-# A pinned list is only as trustworthy as the directories in it -- achado da
-# revisão (issue #6243, retorno do HANCORE-linux). Mais crítico aqui do que
-# em qualquer outro script deste projeto: isto roda como root. /usr/bin/
-# python3 é fixo de propósito -- este é o script que prova que o PATH é
-# confiável, não pode confiar nele ainda pra se encontrar.
-/usr/bin/python3 "${BASH_SOURCE[0]%/*}/../lib/verify_path.py" \
-    || { printf 'browser-setup: %s\n' "PATH contains an untrusted directory -- refusing to run" >&2; exit 1; }
-
-# SELF via expansão de parâmetro, não `dirname`: evita depender de um
-# comando externo antes do PATH estar fixado e verificado.
-SELF="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
-POLICY_PY="$SELF/lib/browser_policy.py"
-
-# Each vendor reads its own policy directory; writing to all present ones is
-# cheaper than detecting which browser the user will install next.
 declare -A POLICY_DIRS=(
     [google-chrome]=/etc/opt/chrome/policies/managed
     [chromium]=/etc/chromium/policies/managed
@@ -44,94 +49,15 @@ declare -A POLICY_DIRS=(
     [edge]=/etc/opt/edge/policies/managed
 )
 
-declare -A BINARIES=(
-    [google-chrome]=google-chrome-stable
-    [chromium]=chromium
-    [brave]=brave
-    [vivaldi]=vivaldi-stable
-    [edge]=microsoft-edge-stable
-)
-
-die() { printf 'browser-setup: %s\n' "$*" >&2; exit 1; }
-
-# Validate before dispatching anything, --list-paths included -- found by
-# review (omasession-8): an earlier version let --list-paths exit before this
-# case ran, so it worked by accident of ordering rather than by being a
-# recognized option. Moving the case's own validated branch up here (rather
-# than the case up past --list-paths) keeps --list-paths root-free, which
-# omasession install/uninstall both depend on. A rejected, unrecognized
-# argument used to fall through to the install loop below -- found by review
-# (omasession-7): a typo on --remove (e.g. --remvoe) silently WROTE the
-# machine-wide policy instead of refusing, the opposite of what someone typing
-# a removal flag wants, with no error to notice it by.
 case "${1:-}" in
-    ""|--install|--remove) ;;
-    --list-paths)
-        for vendor in "${!POLICY_DIRS[@]}"; do
-            printf '%s/omasession-no-promo.json\n' "${POLICY_DIRS[$vendor]}"
-        done
-        exit 0
+    --list-paths) ;;
+    *)
+        printf 'browser-setup: %s\n' \
+            "unknown option: ${1:-} (only --list-paths is supported -- see the README for the manual policy install/removal command)" >&2
+        exit 1
         ;;
-    *) die "unknown option: ${1} (use --remove, --list-paths, or no argument to install)" ;;
 esac
 
-(( EUID == 0 )) || die "needs root to change policy files (run with sudo)"
-
-# The actual write/delete lives in lib/browser_policy.py, not here -- found by
-# review (omasession-12), on two fronts at once. First, a directory that is
-# root-owned right now does not stay that way between a bash `realpath`/`stat`
-# check and the `mktemp`/`mv` that followed it by path a moment later: a
-# symlink swapped into the chain in that window raced the check, and the
-# reviewer reproduced it live. Second, that same check only ever covered
-# install -- remove walked the identical POLICY_DIRS with a bare `rm -f` and
-# no check at all, leaving an as-root arbitrary-delete primitive open right
-# next to the path that had just been closed. Bash has no portable way to
-# open a directory and refuse a symlink atomically (O_DIRECTORY|O_NOFOLLOW)
-# and then act relative to that descriptor rather than a path string again;
-# Python's os.open/openat/rename with dir_fd= does, so both install and
-# remove now go through the same helper, which walks and verifies the whole
-# path component by component -- not just the final directory -- before ever
-# touching a name inside it.
-# --remove undoes exactly what installing wrote, machine-wide: the policy has
-# no per-machine record of which vendors THIS script configured, so remove
-# checks every directory the install loop knows about, not just the ones with
-# a browser installed right now -- a browser removed since install would
-# otherwise leave its policy file behind forever, unreachable by either path.
-# `create=False` in the Python helper is what keeps this sweep from also
-# manufacturing empty policy directories for vendors that were never
-# installed -- achado da revisão (omasession-13): a primeira versão do
-# helper reusava a mesma função que cria diretórios faltantes.
-if [[ "${1:-}" == "--remove" ]]; then
-    removed=0
-    for vendor in "${!POLICY_DIRS[@]}"; do
-        out="$(python3 "$POLICY_PY" remove "${POLICY_DIRS[$vendor]}")" || continue
-        if [[ "$out" == "removed "* ]]; then
-            printf 'browser-setup: %s\n' "$out"
-            removed=$((removed + 1))
-        fi
-    done
-    if (( removed == 0 )); then
-        echo "browser-setup: no policy files present; nothing to remove"
-    else
-        echo "browser-setup: $removed policy file(s) removed"
-    fi
-    exit 0
-fi
-
-installed=0
 for vendor in "${!POLICY_DIRS[@]}"; do
-    command -v "${BINARIES[$vendor]}" >/dev/null 2>&1 || continue
-    dir="${POLICY_DIRS[$vendor]}"
-    if out="$(python3 "$POLICY_PY" install "$dir")"; then
-        printf 'browser-setup: %s → %s\n' "$vendor" "$out"
-        installed=$((installed + 1))
-    else
-        printf 'browser-setup: could not configure %s\n' "$vendor" >&2
-    fi
+    printf '%s/omasession-no-promo.json\n' "${POLICY_DIRS[$vendor]}"
 done
-
-if (( installed == 0 )); then
-    echo "browser-setup: no Chromium-family browser found; nothing to do"
-else
-    echo "browser-setup: $installed browser(s) configured"
-fi

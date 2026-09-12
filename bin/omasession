@@ -754,10 +754,22 @@ cmd_install() {
         listed=1
         [[ -f "$pf" ]] && policy_seen=1
     done < <("$SELF/bin/browser-setup" --list-paths)
+    # Só avisa se algum navegador Chromium-family estiver de fato instalado
+    # -- achado da revisão (omasession-20, rev-2): sem essa guarda, um
+    # usuário só-Firefox recebia o mesmo aviso e, seguindo-o, escrevia uma
+    # política pra um navegador que não existe na máquina (inofensivo, mas
+    # inútil, e o plugin passava a reportar a política como "instalada"
+    # pra um navegador que nunca vai lê-la). A checagem antiga por
+    # navegador saiu junto com o writer que ela existia pra decidir; esta é
+    # só o que sobrou de útil dela.
+    local chromium_family_present=0 bin
+    for bin in google-chrome-stable chromium brave vivaldi-stable microsoft-edge-stable; do
+        command -v "$bin" >/dev/null 2>&1 && { chromium_family_present=1; break; }
+    done
     if (( ! listed )); then
-        err "could not check browser policy (browser-setup --list-paths failed) -- run: sudo $SELF/bin/browser-setup"
-    elif (( ! policy_seen )); then
-        err "browser policy not installed -- run: sudo $SELF/bin/browser-setup"
+        err "could not check browser policy (browser-setup --list-paths failed)"
+    elif (( ! policy_seen && chromium_family_present )); then
+        err "browser policy not installed -- see the README's browser policy section for the one-time manual command"
     fi
     # Silencioso até a rodada 5: quem atualizou de uma versão que desarmava o
     # hyprresume ficava com a linha comentada enquanto o OmaSession estivesse
@@ -780,25 +792,33 @@ cmd_uninstall() {
     if [[ -n "$(safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME.omasession.bak")" ]]; then
         say "backup kept at $(basename "$AUTOSTART").omasession.bak (not applied)"
     fi
-    # browser-setup escreve política root, fora de qualquer diretório que
-    # este comando (sem sudo) tem permissão de tocar -- só detectar e apontar
-    # o caminho de volta, nunca tentar escalar privilégio sozinho aqui. A lista
-    # de diretórios vem de browser-setup --list-paths, não de uma segunda cópia
-    # aqui -- achado da revisão (omasession-7): duas cópias já tinham divergido
-    # (esta tinha 5, o check do install acima só conhecia 2). `listed` separado
-    # de `found` -- achado da revisão (omasession-8): um browser-setup quebrado
-    # ou ausente fazia o loop ler zero linhas, indistinguível de "chequei e não
-    # tem nada", deixando o aviso desligado bem no caminho que ele existe pra
-    # cobrir.
-    local found=0 listed=0 f
+    # A política do navegador mora fora de qualquer diretório que este
+    # comando (sem sudo) tem permissão de tocar, e não é mais escrita por
+    # nenhum script deste plugin -- é um `sudo install`/`sudo rm` literal
+    # que o próprio usuário roda, documentado no README (achado da revisão
+    # de segurança do marketplace, issue #6243, HANCORE-linux: root nunca
+    # deve carregar código deste checkout). Aqui só detecta e imprime o
+    # comando de volta, nunca tenta escalar privilégio sozinho. A lista de
+    # diretórios vem de browser-setup --list-paths (que continua sem
+    # privilégio, só lista caminhos), não de uma segunda cópia aqui --
+    # achado da revisão (omasession-7): duas cópias já tinham divergido
+    # (esta tinha 5, o check do install acima só conhecia 2). `listed`
+    # separado de `found` -- achado da revisão (omasession-8): um
+    # browser-setup quebrado ou ausente fazia o loop ler zero linhas,
+    # indistinguível de "chequei e não tem nada", deixando o aviso
+    # desligado bem no caminho que ele existe pra cobrir.
+    local found=0 listed=0 f present=()
     while IFS= read -r f; do
         listed=1
-        [[ -f "$f" ]] && found=$((found + 1))
+        [[ -f "$f" ]] && { found=$((found + 1)); present+=("$f"); }
     done < <("$SELF/bin/browser-setup" --list-paths)
     if (( ! listed )); then
         say "note: could not check for a leftover browser policy (browser-setup --list-paths failed) -- check /etc/*/policies/managed/omasession-no-promo.json by hand"
     elif (( found > 0 )); then
-        say "note: $found browser-wide restore policy file(s) from browser-setup are still active system-wide -- to remove them: sudo $SELF/bin/browser-setup --remove"
+        say "note: $found browser-wide restore policy file(s) are still active system-wide -- to remove them:"
+        for f in "${present[@]}"; do
+            say "  sudo rm -f $f"
+        done
     fi
     say "uninstalled -- saved sessions in $SESSION_DIR were left alone"
 }

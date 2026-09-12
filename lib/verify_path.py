@@ -4,7 +4,7 @@ else, so a bare command name resolved through it carries the same guarantee
 an absolute path would.
 
 Pinning PATH to a short, fixed list of directories (bin/omasession,
-bin/browser-setup, lib/session-save.sh) is not by itself the claim that none
+lib/session-save.sh) is not by itself the claim that none
 of those directories can be tampered with by a non-root local user -- a
 package, an admin script, or a misconfiguration could leave one of them
 group- or world-writable. Checked once, right after PATH is pinned, with an
@@ -33,9 +33,11 @@ lacunas na versão anterior.
      errado: sticky só impede apagar/renomear entradas alheias, não impede
      CRIAR uma entrada nova com um nome ainda ausente ali -- um
      `/usr/local/bin` 01777 deixaria qualquer usuário plantar um `python3`
-     que nunca existiu, executado como root pelo browser-setup depois.
-     Removida a exceção aqui; ela continua válida em safe_fs.py, que é outro
-     modelo de ameaça.
+     que nunca existiu, executado depois pelo timer/autostart que herdam
+     este PATH (achado anterior à rodada em que bin/browser-setup deixou de
+     rodar como root e de precisar deste script -- issue #6243). Removida a
+     exceção aqui; ela continua válida em safe_fs.py, que é outro modelo de
+     ameaça.
 
   2. Seguir o symlink do componente final com `os.stat` valida o alvo, mas
      nenhum componente DO CAMINHO DO ALVO é caminhado -- só o link em si.

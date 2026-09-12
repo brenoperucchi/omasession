@@ -196,7 +196,8 @@ lib/replay.py         the replay engine (validated)
 lib/capture.py        our own hyprctl-based capture (§2)
 lib/resolve.py        the command resolver capture.py calls (docs/plans/003)
 lib/session-save.sh   capture + title sidecar + generation guard
-bin/browser-setup     one-time root step: per-vendor policy files
+bin/browser-setup     lists per-vendor policy paths; the write is a manual
+                       `sudo install`/`sudo rm` in the README, not a script
 systemd/              snapshot timer, pre-shutdown hook (pending)
 Panel.qml             bar widget
 ```

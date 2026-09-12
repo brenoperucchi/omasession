@@ -58,7 +58,7 @@ POLL = 0.25
 #     --restore-last-session. Affects every vendor.
 #   * Chrome (not Chromium) shows its onboarding pages *instead of* restoring
 #     on the first launch after each version milestone. --no-first-run does not
-#     stop it; the policy from browser-setup.sh plus last_whats_new_version do.
+#     stop it; the policy documented in the README plus last_whats_new_version do.
 #
 # Keyed by the window class Hyprland reports.
 # Terminals take their working directory as an argument; hyprresume records the
@@ -443,8 +443,13 @@ def arm_browser_profile(app: str) -> bool:
 
     policy = Path(spec["policy_dir"]) / "omasession-no-promo.json"
     if app == "google-chrome" and not policy.is_file():
+        # "run browser-setup once, as root" foi a instrução até a rodada 20 --
+        # o comando hoje recusa (issue #6243, HANCORE-linux: root não pode
+        # mais carregar código deste checkout). A instrução certa agora é o
+        # `sudo install -D -T -m 644 ...` literal do README, não um comando.
         print(f"  ! {policy} missing -- Chrome may show onboarding instead of "
-              f"restoring (run browser-setup once, as root)")
+              f"restoring (see the README's browser policy section for the "
+              f"one-time manual command)")
 
     try:
         data = json.loads(prefs.read_text())

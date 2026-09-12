@@ -91,7 +91,8 @@ esac
 # dentro de SESSION_DIR (staging + rename), o que já é seguro contra um
 # symlink plantado exatamente no NOME final -- rename(2) troca a entrada do
 # diretório, nunca segue o que ela apontava (mesma propriedade que
-# lib/browser_policy.py usa e este projeto já mediu). O que faltava
+# lib/browser_policy.py usava e este projeto já mediu, antes de sair do
+# projeto na rodada 20). O que faltava
 # especificamente era provar que nenhum ANCESTRAL da própria SESSION_DIR foi
 # trocado por symlink antes de tudo isso começar -- é só isso que esta
 # checagem fecha, sem reescrever a lógica de staging já testada 25/25 em

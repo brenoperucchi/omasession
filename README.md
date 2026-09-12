@@ -88,17 +88,34 @@ before this step runs. Depends on `python3`, `jq`, and `hyprctl` — all
 present on a stock Omarchy install; `tmux` only if a terminal window is
 already a tmux client.
 
-**Chrome only, one-time, needs root:**
+**Chrome only, one-time, needs root** — a literal command, not a script:
 
 ```
-sudo ~/.config/omarchy/plugins/brenoperucchi.omasession/bin/browser-setup
+printf '%s\n' '{"RestoreOnStartup": 1, "PromotionalTabsEnabled": false, "DefaultBrowserSettingEnabled": false}' \
+  | sudo install -D -T -m 644 /dev/stdin /etc/opt/chrome/policies/managed/omasession-no-promo.json
 ```
+
+Swap the destination for the browser you have — `/etc/chromium/policies/managed/…`,
+`/etc/brave/policies/managed/…`, `/etc/vivaldi/policies/managed/…`, or
+`/etc/opt/edge/policies/managed/…` — same filename, same content;
+`omasession install`/`uninstall` check all five. `install -D -T -m 644`
+creates the directory if it's missing and replaces the destination outright
+at that exact name, the same way this project's own writes do — `-T` is
+what keeps it from treating an existing directory (or a symlink to one) at
+that name as a place to copy *into*, under a name of its own choosing,
+instead of replacing it; without it, a symlink there defeats the write
+silently rather than being refused. One narrower gap remains, and needs
+root already to matter: a symlink swapped into an ancestor directory under
+`/etc` (not the final name) is still followed — every component from
+`/etc` down is normally root-owned 0755, so reaching that requires either
+already having root or an already-broken package.
 
 Chrome replaces session restore with onboarding pages on the first launch
 after every version bump, silently dropping that restore — fixing it needs
 a browser policy file, since Chrome ignores the same setting written by
 hand. Opt-in, run by you, once; `omasession install` never writes it for
-you. Chromium doesn't need this.
+you, and nothing in this plugin ever runs as root. Chromium doesn't need
+this.
 
 ## Usage
 
@@ -134,14 +151,15 @@ still active with nothing left to clean them up:
 ```
 OMASESSION=~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession
 $OMASESSION uninstall
-sudo ~/.config/omarchy/plugins/brenoperucchi.omasession/bin/browser-setup --remove   # only if you ran browser-setup
+sudo rm -f /etc/opt/chrome/policies/managed/omasession-no-promo.json   # only if you ran the browser policy command above
 omarchy plugin remove brenoperucchi.omasession
 ```
 
 `uninstall` disables the snapshot timer, removes only the login-restore
-line it added, and reports whether `browser-setup`'s policy file is still
-present (it's machine-wide, so removing it is a separate, explicit
-command). Saved sessions under `~/.local/share/omasession/` are left alone.
+line it added, and prints the exact `sudo rm -f` for any browser policy
+file it finds still present (it's machine-wide, so removing it is a
+separate, explicit command — swap in whichever vendor path it reports).
+Saved sessions under `~/.local/share/omasession/` are left alone.
 
 ## Where it actually is
 
@@ -150,7 +168,7 @@ command). Saved sessions under `~/.local/share/omasession/` are left alone.
 | `lib/replay.py` — replay engine | **works**, validated across four real reboots |
 | `lib/session-save.sh` — save + guard | **works**, 25/25 in `test/guard-cases.sh` |
 | `lib/resolve.py` — arbitrary application resolver | **works**, 19/19 against a real desktop |
-| `bin/browser-setup [--remove]` | **works**, install and removal both |
+| `bin/browser-setup --list-paths` | **works** — unprivileged, used by install/uninstall to check |
 | `bin/omasession` — CLI | **works**, exercised end to end in the lab |
 | `systemd/` snapshot timer | **works**, written and enabled by `install` |
 | `Panel.qml` — bar widget | **works**, reads `status --json` live |

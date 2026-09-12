@@ -3,16 +3,18 @@
 lib/session-save.sh for every write into the user's own session/config/
 state files and autostart.lua.
 
-Generalizes the pattern lib/browser_policy.py already applies to root's
-Chromium-family policy write: walk the target path one component at a time,
+Generalizes a pattern this project first proved out for root's
+Chromium-family policy write (lib/browser_policy.py, removed in the rodada
+that took that write out of any code path root ever executes -- see git
+history for the original): walk the target path one component at a time,
 opening each with O_DIRECTORY | O_NOFOLLOW relative to the descriptor
 already open for its parent, so a symlink anywhere in the chain makes that
 open() fail outright -- there is no path string left to re-resolve after a
 check, because there never is a separate check.
 
 Marketplace security review (github.com/omacom/omarchy-plugin-marketplace/
-issues/6243): HANCORE-linux's follow-up held this open even after
-browser_policy.py landed, because these paths -- unlike the root-owned
+issues/6243): HANCORE-linux's follow-up held this open even after that
+first fix landed, because these paths -- unlike the then-root-owned
 policy file -- never cross a privilege boundary; this project's own
 judgment was that the risk is much narrower here (exploiting it needs
 write access to the user's own $HOME already, which grants nothing a local
@@ -380,8 +382,9 @@ def rename_within(dir_fd: int, src_name: str, dst_name: str) -> None:
     fechar todos os pontos que sobraram da revisão do HANCORE-linux:
     reproduzido ao vivo que `mv -f arquivo symlink-para-diretorio` ANINHA
     dentro do diretório em vez de substituir o nome -- a mesma classe de
-    bug já achada e corrigida no lib/browser_policy.py, só que lá com
-    `os.rename()` desde o início por rodar como root).
+    bug já achada e corrigida no writer root-only que existia pra isso
+    antes de sair do projeto (`lib/browser_policy.py`, removido na rodada
+    20; usava `os.rename()` desde o início, por rodar como root).
     """
     _require_component(src_name)
     _require_component(dst_name)
