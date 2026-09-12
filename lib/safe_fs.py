@@ -411,6 +411,14 @@ def touch_safe(dir_fd: int, name: str, mode: int = 0o600) -> None:
     I/O"), classificando o único ataque que este primitivo existe pra
     bloquear como se fosse um erro de disco banal.
     """
+    os.close(_open_lock_fd(dir_fd, name, mode))
+
+
+def _open_lock_fd(dir_fd: int, name: str, mode: int) -> int:
+    """The actual safe-open behind touch_safe -- kept separate, and
+    returning the fd instead of closing it, for exec_with_lock below,
+    which needs the SAME descriptor to still be open after this returns.
+    """
     _require_component(name)
     try:
         st = os.lstat(name, dir_fd=dir_fd)
@@ -418,8 +426,41 @@ def touch_safe(dir_fd: int, name: str, mode: int = 0o600) -> None:
         st = None
     if st is not None and stat.S_ISLNK(st.st_mode):
         raise Refused(f"refusing {name}: a symlink where a lock file belongs")
-    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, mode, dir_fd=dir_fd)
-    os.close(fd)
+    return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, mode, dir_fd=dir_fd)
+
+
+def exec_with_lock(dir_path: str, name: str, fd_num: int, command: list[str]) -> None:
+    """Open `name` inside `dir_path` the same safe way touch_safe does,
+    then exec `command` -- replacing this process's own image with it --
+    carrying that descriptor along already open at `fd_num`, inheritable
+    across the exec.
+
+    For lib/session-save.sh's lock file specifically: bash's own `exec
+    N>path` has no O_NOFOLLOW equivalent, and touch_safe-then-`exec N>`
+    (the fix two rounds of review had already landed) still reopens the
+    name by string a moment later, leaving a window between the check and
+    that reopen -- narrowed, never closed. Achado do HANCORE-linux
+    (follow-up de 2026-09-12, issue #6243): a única forma estrutural de
+    fechar é nunca reabrir por nome -- abrir aqui, com O_NOFOLLOW, a
+    partir do dir_fd já verificado, e dar exec preservando o descritor,
+    de forma que o bash que continua depois NUNCA faz seu próprio `open()`
+    nesse nome. `dir_fd`'s own verification (ownership, no symlink in any
+    ancestor) already happened in open_dir_chain by the time this runs;
+    only the final name -- the one bash cannot check itself -- needed
+    this.
+    """
+    dir_fd = open_dir_chain(dir_path, create=True)
+    try:
+        lock_fd = _open_lock_fd(dir_fd, name, 0o600)
+    finally:
+        os.close(dir_fd)
+    try:
+        os.dup2(lock_fd, fd_num)
+    finally:
+        if lock_fd != fd_num:
+            os.close(lock_fd)
+    os.set_inheritable(fd_num, True)
+    os.execvp(command[0], command)
 
 
 def copy_within(dir_fd: int, src_name: str, dst_name: str) -> bool:
@@ -472,11 +513,49 @@ def _parse(args: list[str]) -> tuple[bool, list[str]]:
 def main() -> None:
     if len(sys.argv) < 3:
         print(
-            "usage: safe_fs.py verify|read|write|copy|rename|touch [--create] <dir> <args...>",
+            "usage: safe_fs.py verify|read|write|copy|rename|touch|exec-with-lock "
+            "[--create] <dir> <args...>",
             file=sys.stderr,
         )
         sys.exit(2)
-    verb, create, rest = sys.argv[1], *_parse(sys.argv[2:])
+    verb = sys.argv[1]
+    if verb == "exec-with-lock":
+        # Formato próprio -- não passa por _parse/`rest` porque o argv do
+        # comando embutido (depois do `--`) não pode ser confundido com os
+        # argumentos posicionais dos outros verbos.
+        try:
+            sep = sys.argv.index("--")
+            dir_path, name, fd_num_s = sys.argv[2:sep]
+            command = sys.argv[sep + 1:]
+            if not command:
+                raise ValueError
+        except ValueError:
+            print(
+                "usage: safe_fs.py exec-with-lock <dir> <name> <fd_num> -- "
+                "<command> [args...]",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        try:
+            exec_with_lock(dir_path, name, int(fd_num_s), command)
+        except SystemExit:
+            raise
+        except Refused as exc:
+            print(f"safe_fs: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except OSError as exc:
+            # Inclui FileNotFoundError -- aqui ela só pode vir do próprio
+            # `command[0]` não existir pro execvp, não de "arquivo ausente"
+            # no sentido dos outros verbos (aquele caso já foi resolvido
+            # com create=True no open_dir_chain acima). rc=3 significa
+            # "recusado" pra quem lê bin/omasession -- achado da revisão
+            # (omasession-19, rev-2): emprestar esse código aqui faria um
+            # `bash` ausente do PATH aparecer no painel como "o save
+            # recusou", uma causa específica e falsa.
+            print(f"safe_fs: {exc}", file=sys.stderr)
+            sys.exit(5)
+        return  # exec_with_lock só volta aqui se tiver falhado antes do exec
+    create, rest = _parse(sys.argv[2:])
     try:
         if verb == "verify":
             os.close(open_dir_chain(rest[0], create=create))

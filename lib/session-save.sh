@@ -103,18 +103,38 @@ python3 "${BASH_SOURCE[0]%/*}/safe_fs.py" verify --create "$SESSION_DIR" \
 # hyprctl is enough to overlap two runs; two captures racing on the same file
 # is a way to produce exactly the truncated toml this guard exists to catch.
 #
-# `exec N>path` a seguir é o próprio bash abrindo por nome -- ao contrário de
-# tudo mais neste projeto, não tem um O_NOFOLLOW equivalente, e SEGUE um
-# symlink plantado nesse nome, truncando o que quer que ele aponte. `touch`
-# do safe_fs.py garante, um instante antes, que o nome é um arquivo de
-# verdade (recusa se for symlink) sem truncar um lock que já existe de uma
-# execução anterior -- o normal aqui, já que nada apaga esse arquivo depois
-# de usado. Sobra uma janela entre este touch e o `exec` logo abaixo, mas é a
-# mesma janela de poucas instruções já aceita para SESSION_DIR acima, não a
-# exposição de antes (aberta por toda a vida do arquivo).
-python3 "${BASH_SOURCE[0]%/*}/safe_fs.py" touch "$SESSION_DIR" ".$NAME.lock" \
-    || die "refusing to use .$NAME.lock -- see the safe_fs: line above for why"
-exec 9>"$SESSION_DIR/.$NAME.lock"
+# O lock nunca é reaberto por nome depois de verificado -- achado do
+# HANCORE-linux (follow-up de 2026-09-12, issue #6243, depois de duas
+# rodadas -- omasession-17/18 -- que só tinham ESTREITADO a janela): um
+# `touch` seguro logo antes de `exec 9>"$path"` ainda deixa o bash reabrir
+# por STRING um instante depois, e essa reabertura em si não tem
+# O_NOFOLLOW -- estreitar a janela não é o mesmo que fechá-la. Em vez
+# disso, na primeira invocação (o fd ainda não existe), este script se
+# re-executa via `safe_fs.py exec-with-lock`: um wrapper Python que abre o
+# lock com O_NOFOLLOW a partir do MESMO dir_fd já verificado (nunca por
+# string solta) e dá `exec` de volta NESTE MESMO script, preservando esse
+# descritor já aberto no fd 9. O bash que continua depois deste `if` NUNCA
+# chama open() nesse nome -- só herda um fd que já nasceu seguro. Tudo
+# antes deste ponto (PATH, SESSION_DIR, a checagem de ancestralidade) roda
+# de novo na segunda passada, sem problema: são todas idempotentes.
+#
+# A guarda testa o PRÓPRIO fd 9 (`: 2>/dev/null >&9`, sucesso só se 9 já
+# está aberto), não uma variável de ambiente dizendo que ele está -- achado
+# da revisão (omasession-19, rev-2): uma variável é um acordo, o fd é o
+# fato; medido ao vivo que os dois podem discordar (a variável setada mas o
+# fd fechado por algum motivo faz o script alegar "outro save rodando" sem
+# que haja um; um FILHO deste script herdaria a mesma variável E o mesmo fd
+# já travado, e passaria pela guarda como se fosse a primeira execução,
+# tornando o lock um no-op -- inalcançável hoje porque nenhum filho invoca
+# este script de novo, mas a garantia do fd 9 fecha a classe inteira sem
+# depender disso continuar sendo verdade). A ordem dos redirects importa:
+# `2>/dev/null` tem que vir ANTES de `>&9`, senão o "Bad file descriptor"
+# do próprio bash escapa pro terminal antes do redirecionamento de erro
+# valer.
+if ! : 2>/dev/null >&9; then
+    exec python3 "${BASH_SOURCE[0]%/*}/safe_fs.py" exec-with-lock \
+        "$SESSION_DIR" ".$NAME.lock" 9 -- bash "${BASH_SOURCE[0]}" "$@"
+fi
 if ! flock -n 9; then
     err "another save is already running -- skipping this tick"
     exit 4
