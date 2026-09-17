@@ -31,10 +31,13 @@ import sys
 import tempfile
 import time
 import tomllib
+import contextlib
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from safe_fs import read_capped_path  # noqa: E402
+from safe_fs import read_capped_path, open_dir_chain, write_bytes  # noqa: E402
+from tiled_layout import restore_tiled  # noqa: E402
 
 SESSION = Path.home() / ".local/share/omasession/sessions/last.toml"
 WINDOW_TIMEOUT = 15.0
@@ -184,12 +187,12 @@ def mapped() -> list[dict]:
     return [c for c in clients() if c.get("mapped") and c["workspace"]["id"] > 0]
 
 
-def find_new(known: set[str], timeout: float):
+def find_new(known: set[str], timeout: float, app: str | None = None):
     """First mapped window whose address is not in `known`."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for c in mapped():
-            if c["address"] not in known:
+            if c["address"] not in known and (app is None or c.get("class") == app):
                 return c
         time.sleep(POLL)
     return None
@@ -224,13 +227,11 @@ def place(addr: str, spec: dict) -> None:
     size = spec.get("size") or [None, None]
     pos = spec.get("position") or [None, None]
     if size[0] and size[1]:
-        dispatch("window.resize", window=sel, x=size[0], y=size[1], exact=True)
+        dispatch("window.resize", window=sel, x=size[0], y=size[1], relative=False)
         time.sleep(SETTLE)
     if pos[0] is not None and pos[1] is not None:
-        # exact=true here too: probe.sh sets positions with it and resize above
-        # already used it, so without it the saved coordinates were being
-        # applied under a different meaning than the one they were measured in.
-        dispatch("window.move", window=sel, x=pos[0], y=pos[1], exact=True)
+        # Lua IPC on Hyprland 0.56 uses relative=false for absolute coordinates.
+        dispatch("window.move", window=sel, x=pos[0], y=pos[1], relative=False)
         time.sleep(SETTLE)
 
 
@@ -243,6 +244,7 @@ def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
     for c in mapped():
         if c["address"] not in claimed and c.get("class") == app:
             claimed.add(c["address"])
+            spec["_restored_address"] = c["address"]
             place(c["address"], spec)
             print(f"[{index}/{total}] {app}: adopted existing window → ws{ws}")
             return True
@@ -270,12 +272,13 @@ def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
     known = {c["address"] for c in mapped()} | claimed
     dispatch("exec_cmd", f"uwsm app -- {cmd}")
 
-    win = find_new(known, WINDOW_TIMEOUT)
+    win = find_new(known, WINDOW_TIMEOUT, app)
     if win is None:
         print(f"[{index}/{total}] {app}: no window after {WINDOW_TIMEOUT:.0f}s")
         return False
 
     claimed.add(win["address"])
+    spec["_restored_address"] = win["address"]
     place(win["address"], spec)
     print(f"[{index}/{total}] {app}: restored → ws{ws}")
     return True
@@ -485,102 +488,61 @@ def arm_browser_profile(app: str) -> bool:
         return False
 
 
+def browser_command(command: str) -> str:
+    """Request the native saved session explicitly, without opening a blank."""
+    argv = [arg for arg in shlex.split(command) if arg != "--new-window"]
+    for flag in ("--restore-last-session", "--no-first-run", "--no-default-browser-check"):
+        if flag not in argv:
+            argv.append(flag)
+    return shlex.join(argv)
+
+
 def restore_browser(app: str, specs: list[dict], titles: list[dict],
                     claimed: set[str]) -> int:
-    """Launch the browser once, then place the windows it reopens by title."""
+    """Restore native browser tabs, then associate each window with its spec."""
     want = len(specs)
-    print(f"[browser] {app}: {want} window(s) -- letting the browser restore them")
-    if not arm_browser_profile(app):
-        print(f"  ! no profile for {app}, falling back to per-window launch")
-        return sum(restore(s, claimed, i, want) for i, s in enumerate(specs, 1))
+    print(f"[browser] {app}: requesting its last session ({want} windows)")
+    existing = [w for w in mapped() if w.get("class") == app
+                and w["address"] not in claimed]
+    if existing:
+        # Do not rewrite a live profile or open extra windows on top of it.
+        found = existing
+        print(f"  {app} already running: preserving its current tabs")
+    else:
+        if not arm_browser_profile(app):
+            print(f"  ! could not prepare {app}'s native session")
+        known = {c["address"] for c in mapped()} | claimed
+        cmd = browser_command(specs[0].get("launch_cmd") or app)
+        dispatch("exec_cmd", f"uwsm app -- {cmd}")
+        found = wait_for_browser(app, known, want)
 
-    known = {c["address"] for c in mapped()} | claimed
-    cmd = specs[0].get("launch_cmd") or app
-    # Google Chrome hijacks the first launch after an install or version bump
-    # with its onboarding pages ("What's New", default-browser check) and shows
-    # those *instead of* restoring the session. Chromium does not. These flags
-    # are what keep the restore from being silently swallowed.
-    for flag in ("--no-first-run", "--no-default-browser-check"):
-        if flag not in cmd:
-            cmd = f"{cmd} {flag}"
-    dispatch("exec_cmd", f"uwsm app -- {cmd}")
-
-    # Wait for the browser to reopen what it intends to -- but stop as soon as
-    # it settles. A fixed wait burns the whole timeout whenever the browser
-    # hands back fewer windows than we saved, which is the common case after an
-    # unclean shutdown: two browsers x 40s dominated an 82s restore.
-    found = wait_for_browser(app, known, want)
-    if not found:
-        print(f"  ! {app} reopened nothing")
-
-    # Title is the only key that survives -- the windows share a PID, a class
-    # and a command line. But it is a soft key: a page that had not finished
-    # loading reports its bare domain ("wiki.hypr.land") where the save
-    # recorded the real title ("Hyprland Wiki"). Exact matching alone drops
-    # those, so fall back to closest-match, then to leftover slots.
-    wanted = [dict(t) for t in titles if t.get("class") == app]
+    wanted = list(specs)
+    unmatched = []
     placed = 0
-    leftovers: list[dict] = []
-
     for win in found:
-        claimed.add(win["address"])
-        target = take_best_match(win["title"], wanted)
+        target = take_best_match(win.get("title", ""), wanted)
         if target is None:
-            leftovers.append(win)
-            continue
-        move_to(win["address"], target["workspace"])
-        print(f"  → {strip_suffix(win['title'])[:40]:42s} ws{target['workspace']}")
-        placed += 1
-
-    # The browser reopens what *it* considers the last session, which need not
-    # be the session we saved: it can hand back more windows than we asked for
-    # (stale profile state) or fewer. Park the extras on the workspaces we
-    # still expected to fill, so nothing piles up on the active one.
-    #
-    # A blank placeholder window is never one of those legitimate extras -- it
-    # holds no content, saved or not, so filling a slot with it would silently
-    # swap a real (just slower to appear) page for an empty one. Close it
-    # instead and leave the slot for the "open ourselves" fallback below,
-    # which at least lands the eventual replacement on the right workspace.
-    for win in leftovers:
-        if is_blank_tab(win.get("title", "")):
-            dispatch("window.close", window=f"address:{win['address']}")
-            print(f"  x closed a blank window {app} opened before its own "
-                  f"restore caught up")
-            continue
-        if wanted:
-            target = wanted.pop(0)
-            move_to(win["address"], target["workspace"])
-            print(f"  ~ {strip_suffix(win['title'])[:40]:42s} ws{target['workspace']}"
-                  f"  (no title match, filled a saved slot)")
-            placed += 1
-        else:
-            print(f"  ! extra window the browser reopened: "
-                  f"{strip_suffix(win['title'])[:40]}")
-
-    # Whatever the browser did not hand back, open ourselves. The tabs of those
-    # windows are gone -- only the browser could have restored them, and it
-    # did not -- but an empty window on the right workspace preserves the shape
-    # of the session, which is what the user navigates by. Leaving a hole would
-    # silently shrink the desktop every time a browser exits uncleanly.
-    for target in list(wanted):
-        known_now = {c["address"] for c in mapped()} | claimed
-        dispatch("exec_cmd", f"uwsm app -- {cmd} --new-window")
-        win = find_new(known_now, WINDOW_TIMEOUT)
-        if win is None:
-            print(f"  ! could not open a replacement window for "
-                  f"ws{target['workspace']}")
+            unmatched.append(win)
             continue
         claimed.add(win["address"])
-        move_to(win["address"], target["workspace"])
-        wanted.remove(target)
-        print(f"  + empty window → ws{target['workspace']}"
-              f"  (browser did not restore \"{strip_suffix(target.get('title',''))[:28]}\")")
+        target["_restored_address"] = win["address"]
+        place(win["address"], target)
         placed += 1
-
-    print(f"[browser] {app}: {placed}/{want} placed "
-          f"({len(found)} reopened by the browser)")
-    return min(placed, want)
+    for win in unmatched:
+        if not wanted:
+            continue
+        target = wanted.pop(0)
+        claimed.add(win["address"])
+        target["_restored_address"] = win["address"]
+        place(win["address"], target)
+        placed += 1
+        print(f"  ! browser title differs from the snapshot: {win.get('title', '')[:60]}")
+    # A window titled New Tab can contain real background tabs. Never close
+    # it or fabricate blank replacements for windows whose tabs did not return.
+    if wanted:
+        print(f"  ! {len(wanted)} saved browser windows did not return; no blank replacements opened")
+    print(f"[browser] {app}: {placed}/{want} windows placed")
+    return placed
 
 
 def sidecar_for(toml: Path) -> Path:
@@ -735,6 +697,15 @@ def main() -> int:
 
     print(f"restoring {len(windows)} window(s) from {path}\n")
 
+    # Older snapshots store titles only in the sidecar, in capture order.
+    by_class = {}
+    for title in titles:
+        by_class.setdefault(title.get("class"), []).append(title)
+    for spec in windows:
+        candidates = by_class.get(spec.get("app_id"), [])
+        old_title = candidates.pop(0).get("title", "") if candidates else ""
+        spec.setdefault("title", old_title)
+
     browser_specs: dict[str, list[dict]] = {}
     plain: list[dict] = []
     for spec in windows:
@@ -751,6 +722,7 @@ def main() -> int:
         ok += restore_browser(app, specs, titles, claimed)
     for i, spec in enumerate(plain, start=1):
         ok += restore(spec, claimed, i, len(plain))
+    restore_tiled(windows, hypr, lua)
     elapsed = time.monotonic() - started
 
     # Report against the screen, not against our own bookkeeping: reporting
@@ -765,5 +737,36 @@ def main() -> int:
     return 0 if ok == len(windows) else 2
 
 
+def run_logged() -> int:
+    """Keep login output: UWSM scopes do not reliably retain stdout."""
+    state = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "omasession"
+    fd = open_dir_chain(str(state), create=True)
+    chunks = [time.strftime("Restore started %Y-%m-%d %H:%M:%S %Z\n")]
+
+    class Tee:
+        def __init__(self, target):
+            self.target = target
+
+        def write(self, text):
+            self.target.write(text)
+            chunks.append(text)
+            if "\n" in text:
+                write_bytes(fd, "last-restore.log", "".join(chunks).encode())
+            return len(text)
+
+        def flush(self):
+            self.target.flush()
+
+    try:
+        with contextlib.redirect_stdout(Tee(sys.stdout)), contextlib.redirect_stderr(Tee(sys.stderr)):
+            try:
+                return main()
+            except Exception:
+                traceback.print_exc()
+                return 1
+    finally:
+        os.close(fd)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_logged())

@@ -26,7 +26,7 @@ def main() -> int:
         pid = int(w.get("pid") or 0)
         if not pid:
             continue
-        cwd, why = R.child_cwd(pid)
+        cwd, why = R.child_cwd(pid, w.get("title", ""))
         w["cwd"] = cwd
         w["cwdNote"] = why
     json.dump(doc, sys.stdout)

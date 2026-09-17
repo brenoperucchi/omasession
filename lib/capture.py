@@ -92,6 +92,7 @@ def capture(name: str = "last", clients: object | None = None) -> str:
 
         fields = {
             "app_id": klass,
+            "title": c.get("title", ""),
             "launch_cmd": cmd,
             "workspace": str(c["workspace"]["id"]),
             "monitor": next((m["name"] for m in monitors if m.get("id") == c.get("monitor")), None),

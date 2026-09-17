@@ -47,6 +47,7 @@ TERMINAL_CWD_FLAG = {
     "Alacritty": "--working-directory",
     "kitty": "--directory",
     "com.mitchellh.ghostty": "--working-directory",
+    "ghostty": "--working-directory",
     "org.wezfurlong.wezterm": "--cwd",
 }
 
@@ -239,13 +240,21 @@ def _comm(pid: str) -> str:
 
 
 def _children(pid) -> list[str]:
+    # Ghostty spawns shells from worker threads. The main thread's children
+    # file alone is empty even while several terminal shells are alive.
     try:
-        return Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+        result = set()
+        for task in Path(f"/proc/{pid}/task").iterdir():
+            try:
+                result.update((task / "children").read_text().split())
+            except OSError:
+                continue
+        return sorted(result, key=int)
     except OSError:
         return []
 
 
-def child_cwd(pid: int) -> tuple[str | None, str]:
+def child_cwd(pid: int, title: str = "") -> tuple[str | None, str]:
     """The directory a terminal's shell is in, and why, or (None, reason).
 
     /proc/<pid>/cwd is the emulator's own -- wherever it was started, almost
@@ -299,6 +308,19 @@ def child_cwd(pid: int) -> tuple[str | None, str]:
     if len(distinct) == 1:
         return candidates[0][0], f"shell: {candidates[0][1]}"
     if len(distinct) > 1:
+        # Older, already-running Ghostty windows can share a process. Only
+        # disambiguate when the title's explicit folder suffix identifies one
+        # distinct live directory. Colliding basenames remain unresolved.
+        matches = {cwd for cwd in distinct if title and any(
+            title.endswith(suffix) for suffix in (
+                " | " + Path(cwd).name, ":" + cwd,
+                ":" + ("~" + cwd[len(str(Path.home())):]
+                       if cwd == str(Path.home()) or cwd.startswith(str(Path.home()) + "/")
+                       else cwd),
+            )
+        )}
+        if len(matches) == 1:
+            return matches.pop(), "live shell directory matched by window title"
         return None, (f"{len(distinct)} shells under this terminal; "
                       f"cannot tell which one is this window")
     if saw_mux:
@@ -444,6 +466,29 @@ def window_class(window: dict) -> str:
     return window.get("initialClass") or window.get("class") or ""
 
 
+def ghostty_argv(argv: list[str], cwd: str | None) -> list[str]:
+    effective = skip_env_wrapper(argv)
+    prefix = argv[:len(argv) - len(effective)]
+    end = next((i for i, arg in enumerate(effective)
+                if arg in ("-e", "--command", "--")), len(effective))
+    head, tail = effective[1:end], effective[end:]
+    clean = []
+    skip = False
+    for arg in head:
+        if skip:
+            skip = False
+            continue
+        names = ("--gtk-single-instance", "--working-directory") if cwd else ("--gtk-single-instance",)
+        if arg in names:
+            skip = True
+        elif not any(arg.startswith(name + "=") for name in names):
+            clean.append(arg)
+    flags = ["--gtk-single-instance=false"]
+    if cwd:
+        flags.append("--working-directory=" + cwd)
+    return prefix + [effective[0]] + flags + clean + tail
+
+
 def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
     """Resolve one window. Always returns a dict; `argv` is None on failure.
 
@@ -502,12 +547,14 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
     wants_tmux = klass in TRAILING_ARGV_TERMINALS or resolved_bin in TRAILING_ARGV_TERMINALS
 
     if (cwd_flag or wants_tmux) and pid:
-        cwd, why = child_cwd(pid)
+        cwd, why = child_cwd(pid, window.get("title", ""))
         result["cwd_note"] = why
         if cwd and cwd_flag:
             result["cwd"] = cwd
             argv = result["argv"]
-            if argv and not any(a.startswith(cwd_flag) for a in argv):
+            if argv and resolved_bin == "ghostty":
+                result["argv"] = ghostty_argv(argv, cwd)
+            elif argv and not any(a.startswith(cwd_flag) for a in argv):
                 # Antes do `--`, não depois: achado da rodada 6 -- `foot
                 # --app-id=X -- bash` virava `foot --app-id=X -- bash
                 # --working-directory=Y`, entregando o flag pro bash, não pro
@@ -568,6 +615,12 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
                     # si falhar -- replay.py já sabe inserir isto antes de um
                     # `--`, exatamente o caso que seu próprio comentário cita.
                     result["cwd"] = session_path
+
+    # A separate process both honors --working-directory and makes the next
+    # snapshot unambiguous. Ghostty's desktop launcher otherwise forces a
+    # shared process, where ordinary CLI cwd flags can be ignored.
+    if resolved_bin == "ghostty" and result.get("argv"):
+        result["argv"] = ghostty_argv(result["argv"], result.get("cwd"))
 
     return result
 
