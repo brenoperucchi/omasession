@@ -40,6 +40,13 @@ reports success against an empty desktop.
 Geometry, floating state and a terminal's working directory come back
 identical.
 
+**Dwindle tiled layouts.** On complete workspaces, restore reconstructs the
+saved split directions and proportions, then verifies the resulting tiles.
+Workspaces with missing or extra tiles, unsupported settings, or incompatible
+geometry are skipped with a diagnostic. This also applies to app-only restores:
+they cannot rebuild just one app's portion of a mixed-app layout. See
+[`docs/tiled-layout.md`](docs/tiled-layout.md) for requirements and testing.
+
 ## How it works
 
 **Resolving what to relaunch.** `lib/resolve.py` answers "what command

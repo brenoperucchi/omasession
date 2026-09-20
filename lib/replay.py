@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from resolve import skip_env_wrapper  # noqa: E402
 from safe_fs import Refused, TooLarge, open_dir_chain, read_capped_path, write_bytes  # noqa: E402
+from tiled_layout import restore_tiled  # noqa: E402
 
 SESSION = Path.home() / ".local/share/omasession/sessions/last.toml"
 WINDOW_TIMEOUT = 15.0
@@ -244,8 +245,10 @@ def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
 
     # 3. Adopt a surviving window of the same class before launching another.
     for c in mapped():
-        if c["address"] not in claimed and c.get("class") == app:
+        if (c["address"] not in claimed and c.get("class") == app
+                and ("_adopt_address" not in spec or spec["_adopt_address"] == c["address"])):
             claimed.add(c["address"])
+            spec["_restored_address"] = c["address"]
             place(c["address"], spec)
             print(f"[{index}/{total}] {app}: adopted existing window → ws{ws}")
             return True
@@ -279,6 +282,7 @@ def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
         return False
 
     claimed.add(win["address"])
+    spec["_restored_address"] = win["address"]
     place(win["address"], spec)
     print(f"[{index}/{total}] {app}: restored → ws{ws}")
     return True
@@ -409,6 +413,59 @@ def plan_browser_matches(windows: list[dict], candidates: list[dict]):
         if target is not None:
             matches[win_i] = target
     return matches, remaining
+
+
+def reserve_existing(specs: list[dict], live: list[dict]) -> None:
+    """Reserve exact titles before class-only adoption can consume them.
+
+    Addresses bind the split tree to content, not compositor enumeration order.
+    Repeated/changed terminal titles remain inherently ambiguous; use stable
+    class-order fallback after reserving all the exact matches we can prove.
+    """
+    available = list(live)
+    for spec in specs:
+        spec["_adopt_address"] = None
+        spec.pop("_restored_address", None)
+        for index, window in enumerate(available):
+            if (spec.get("title") and window.get("class") == spec.get("app_id")
+                    and window.get("title") == spec["title"]):
+                spec["_adopt_address"] = available.pop(index)["address"]
+                break
+    for spec in specs:
+        if spec["_adopt_address"] is not None:
+            continue
+        for index, window in enumerate(available):
+            if window.get("class") == spec.get("app_id"):
+                spec["_adopt_address"] = available.pop(index)["address"]
+                break
+
+
+def browser_targets(app: str, specs: list[dict], titles: list[dict]) -> list[dict]:
+    """Keep upstream's title matching while linking each slot to its geometry.
+
+    Legacy snapshots have titles only in a sidecar; capture order breaks ties
+    within a workspace. An inconsistent sidecar may still place browser windows
+    as before, but cannot authorize reconstructing a layout from another slot.
+    """
+    remaining = list(specs)
+    targets = []
+    for title in titles:
+        if title.get("class") != app:
+            continue
+        target = dict(title)
+        for index, spec in enumerate(remaining):
+            if (str(spec.get("workspace")) == str(title.get("workspace")) and
+                    ("title" not in spec or spec["title"] == title.get("title"))):
+                target["_spec"] = remaining.pop(index)
+                break
+        targets.append(target)
+    return targets
+
+
+def place_browser(addr: str, target: dict) -> None:
+    move_to(addr, target["workspace"])
+    if "_spec" in target:
+        target["_spec"]["_restored_address"] = addr
 
 
 def browser_major_version(binary: str) -> int | None:
@@ -594,7 +651,7 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
     # loading reports its bare domain ("wiki.hypr.land") where the save
     # recorded the real title ("Hyprland Wiki"). Exact matching alone drops
     # those, so fall back to closest-match, then to leftover slots.
-    wanted = [dict(t) for t in titles if t.get("class") == app]
+    wanted = browser_targets(app, specs, titles)
     matches, wanted = plan_browser_matches(found, wanted)
     placed = 0
     leftovers: list[dict] = []
@@ -605,7 +662,7 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
         if target is None:
             leftovers.append(win)
             continue
-        move_to(win["address"], target["workspace"])
+        place_browser(win["address"], target)
         print(f"  → {strip_suffix(win['title'])[:40]:42s} ws{target['workspace']}")
         placed += 1
 
@@ -626,7 +683,7 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
                       f"{strip_suffix(win.get('title', ''))[:40]}")
             elif wanted:
                 target = wanted.pop(0)
-                move_to(win["address"], target["workspace"])
+                place_browser(win["address"], target)
                 print(f"  ~ moving unmatched blank browser window "
                       f"to ws{target['workspace']}")
                 placed += 1
@@ -640,7 +697,7 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
             continue
         if wanted:
             target = wanted.pop(0)
-            move_to(win["address"], target["workspace"])
+            place_browser(win["address"], target)
             print(f"  ~ {strip_suffix(win['title'])[:40]:42s} ws{target['workspace']}"
                   f"  (no title match, filled a saved slot)")
             placed += 1
@@ -663,7 +720,7 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
                   f"ws{target['workspace']}")
             continue
         claimed.add(win["address"])
-        move_to(win["address"], target["workspace"])
+        place_browser(win["address"], target)
         wanted.remove(target)
         print(f"  + empty window → ws{target['workspace']}"
               f"  (browser did not restore \"{strip_suffix(target.get('title',''))[:28]}\")")
@@ -832,6 +889,7 @@ def main() -> int:
         print("nothing to restore", file=sys.stderr)
         return 1
 
+    all_windows = list(windows)
     policy_skipped = False
     if app_filter:
         filter_classes = {app_filter}
@@ -883,8 +941,15 @@ def main() -> int:
     ok = 0
     for app, specs in browser_specs.items():
         ok += restore_browser(app, specs, title_records, claimed)
+    reserve_existing(plain, mapped())
     for i, spec in enumerate(plain, start=1):
         ok += restore(spec, claimed, i, len(plain))
+    # Retain excluded apps on affected desks for the completeness check. An
+    # app-only restore must not stretch half of a saved layout over the desk
+    # just because its other apps have not been opened yet.
+    affected_workspaces = {str(w.get("workspace", "1")) for w in windows}
+    layout = restore_tiled([w for w in all_windows
+                            if str(w.get("workspace", "1")) in affected_workspaces], hypr, lua)
     elapsed = time.monotonic() - started
 
     # Report against the screen, not against our own bookkeeping: reporting
@@ -896,7 +961,7 @@ def main() -> int:
     for c in sorted(on_screen, key=lambda c: (c["workspace"]["id"], c["class"])):
         w, h = c["size"]
         print(f"  ws{c['workspace']['id']}  {c['class']}  {w}x{h}  float={c['floating']}")
-    return 0 if ok == len(windows) else 2
+    return 0 if ok == len(windows) and not layout.failed else 2
 
 
 def run_logged() -> int:
