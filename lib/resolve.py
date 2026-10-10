@@ -221,6 +221,12 @@ def from_cmdline(pid: int) -> list[str] | None:
     argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
     if not argv:
         return None
+    # Chromium and Electron rewrite their process title, collapsing argv into
+    # one space-joined string with no NUL separators. Taken as-is, command()
+    # quotes it as a single word and uwsm reports 'Path "<whole line>" does
+    # not exist'. Only split when the whole string is not itself a real path.
+    if len(argv) == 1 and " " in argv[0] and not Path(argv[0]).exists():
+        argv = argv[0].split()
     return argv
 
 
