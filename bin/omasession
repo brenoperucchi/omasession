@@ -7,6 +7,7 @@
 #                                 (--if-enabled: só se restoreOnLogin estiver on)
 #   omasession restore-app [app]     restore one app from the saved session
 #   omasession status [--json]    what was captured, when, and what is wrong
+#   omasession list [--json]      named sessions and the history of `last`
 #   omasession resolve [--json]   which command each open window resolves to
 #   omasession install            timer, login restore, browser policy
 #   omasession uninstall          undo install
@@ -512,6 +513,10 @@ PY
           appAvailability:{googleChrome:{installed:$chromeInstalled,captured:$chromeCaptured},
                             ghostty:{installed:$ghosttyInstalled,captured:$ghosttyCaptured}},
           session:$session, usingFallback:$fallback, notes:$notes}'
+}
+
+cmd_list() {
+    python3 "$LIB/history.py" list "$SESSION_DIR" "$@"
 }
 
 cmd_status() {
@@ -1047,6 +1052,7 @@ case "${1:-}" in
     restore-browser) shift; cmd_restore_browser "$@" ;;
     restore-app) shift; cmd_restore_app "$@" ;;
     status)    shift; cmd_status "$@" ;;
+    list)      shift; cmd_list "$@" ;;
     resolve)   shift; cmd_resolve "$@" ;;
     install)   shift; cmd_install "$@" ;;
     uninstall) shift; cmd_uninstall "$@" ;;

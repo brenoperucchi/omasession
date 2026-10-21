@@ -6,6 +6,13 @@ request.
 
 ## Unreleased
 
+- A history of earlier sessions. Each save of `last` is also kept as
+  `history-<time>` when the desktop's shape changed (windows, workspaces,
+  slots, commands; not titles), thinned to every change for 15 minutes, one
+  per 15 minutes for 2 hours, one per hour for a day and one per day for a
+  week. `omasession list` shows them with named sessions (`omasession save
+  <name>`); `omasession restore <name>` brings any back.
+
 - Every browser profile that had a window comes back, not only Default. The
   save records the browser's open profiles (Local State
   `last_active_profiles`); restore marks each as cleanly closed and launches

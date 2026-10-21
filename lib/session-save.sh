@@ -234,7 +234,7 @@ PY
 # work-staging`, um `save work` apagava e sobrescrevia aquela sessão do usuário
 # com o próprio staging. Os locks eram diferentes e o arquivo era o mesmo.
 case "$NAME" in
-    omasession.*|*.prev)
+    omasession.*|*.prev|history-*)
         die "'$NAME' is reserved for internal use"
         ;;
 esac
@@ -490,6 +490,12 @@ python3 "$SAFE_FS_SS" rename "$SESSION_DIR" "$STAGING.toml" "$NAME.toml" \
 python3 "$SAFE_FS_SS" rename "$SESSION_DIR" "$STAGING.titles.json" "$NAME.titles.json" \
     || die "could not publish $SIDECAR"
 sync_path "$SESSION_DIR" || err "published, but the directory flush failed -- durability uncertain"
+
+# Keep a thinned-out history of `last` (lib/history.py). Losing a history
+# entry must never fail the save that just succeeded.
+if [[ "$NAME" == "last" ]]; then
+    python3 "${BASH_SOURCE[0]%/*}/history.py" snapshot "$SESSION_DIR" || err "history snapshot skipped"
+fi
 
 extra=""
 (( count_scratch > 0 )) && extra=", $count_scratch scratchpad window(s) not saved"
