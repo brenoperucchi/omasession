@@ -185,7 +185,8 @@ class FirstPortCases(unittest.TestCase):
             with patch.object(sys, "argv", ["replay.py", "--app",
                                              "com.mitchellh.ghostty", str(path)]), \
                  patch.object(replay, "restore", return_value=True) as restore, \
-                 patch.object(replay, "mapped", return_value=[]):
+                 patch.object(replay, "mapped", return_value=[]), \
+                 patch.object(replay, "release_parked", return_value=0):
                 self.assertEqual(replay.main(), 0)
             self.assertEqual(restore.call_count, 1)
             self.assertEqual(restore.call_args.args[0]["app_id"],
@@ -203,7 +204,8 @@ class FirstPortCases(unittest.TestCase):
             with patch.object(sys, "argv", ["replay.py", str(path)]), \
                  patch.dict(replay.os.environ,
                             {"OMASESSION_APP_RESTORE_GHOSTTY": "false"}), \
-                 patch.object(replay, "mapped", return_value=[]):
+                 patch.object(replay, "mapped", return_value=[]), \
+                 patch.object(replay, "release_parked", return_value=0):
                 self.assertEqual(replay.main(), 0)
 
 

@@ -120,6 +120,49 @@ def program_windows(windows: list[dict], allowed: set[str]) -> dict[str, dict]:
     return result
 
 
+def layout_slot_order() -> dict[str, list[str]]:
+    """Window addresses per workspace, in the order the layout slots them.
+
+    Hyprland does not report a workspace's tiling order, and its client list
+    keeps creation order even after windows are swapped. A Lua config can fill
+    the gap by defining a global `window_slot_order()` that returns JSON of
+    the form {"<workspace id>": ["0x<address>", ...]} -- a Lua layout sees that
+    order in ctx.targets on every recalculate. Without it, {} (callers fall
+    back to the client list order).
+    """
+    try:
+        out = subprocess.run(
+            ["hyprctl", "repl",
+             'return type(window_slot_order) == "function" and window_slot_order() or ""'],
+            capture_output=True, text=True, timeout=15,
+        )
+        order = json.loads(out.stdout.strip() or "{}")
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
+        return {}
+    if not isinstance(order, dict):
+        return {}
+    return {str(ws): [a for a in addrs if isinstance(a, str)]
+            for ws, addrs in order.items() if isinstance(addrs, list)}
+
+
+def slot_orders(windows: list[dict], layout_order: dict[str, list[str]]) -> dict[str, int]:
+    """Each window's position among its workspace's windows, by address.
+
+    The layout's own order where it reports one; otherwise the client list
+    order, which is right until windows are swapped.
+    """
+    result: dict[str, int] = {}
+    by_workspace: dict[str, list[str]] = {}
+    for c in windows:
+        by_workspace.setdefault(str(c["workspace"]["id"]), []).append(c.get("address", ""))
+    for ws, addrs in by_workspace.items():
+        ranked = [a for a in layout_order.get(ws, []) if a in addrs]
+        ranked += [a for a in addrs if a not in ranked]
+        for i, addr in enumerate(ranked):
+            result[addr] = i
+    return result
+
+
 def capture(name: str = "last", clients: object | None = None) -> str:
     if clients is None:
         clients = hyprctl_json("clients")
@@ -133,6 +176,7 @@ def capture(name: str = "last", clients: object | None = None) -> str:
 
     doc = [f'[session]\nname = {toml_str(name)}\ntimestamp = {int(time.time())}\n']
     programs = program_windows(windows, allowed_programs())
+    orders = slot_orders(windows, layout_slot_order())
 
     for c in windows:
         klass = c.get("class", "")
@@ -156,6 +200,7 @@ def capture(name: str = "last", clients: object | None = None) -> str:
             "position": c.get("at"),
             "size": c.get("size"),
             "cwd": result.get("cwd"),
+            "order": orders.get(c.get("address", "")),
         }
         doc.append(window_toml(fields))
 
