@@ -122,6 +122,32 @@ BROWSERS = {
 SESSION_REPAIR_BROWSERS = frozenset({"google-chrome", "chromium"})
 
 
+def profile_root(app: str) -> Path:
+    """The browser's user data directory (the parent of every profile)."""
+    return Path(BROWSERS[app]["profile"]).expanduser().parent.parent
+
+
+def last_active_profiles(app: str) -> list[str]:
+    """Profiles the browser had open, from its Local State; [] if unknown.
+
+    Chromium keeps this list current while it runs, so a save taken during the
+    session names every profile with a window -- the set a restore has to
+    reopen, not just Default.
+    """
+    try:
+        state = json.loads((profile_root(app) / "Local State").read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    profiles = state.get("profile", {}).get("last_active_profiles", [])
+    return [p for p in profiles if isinstance(p, str) and valid_profile(p)]
+
+
+def valid_profile(name: str) -> bool:
+    """A single folder name: no path separator, not empty, not `.` or `..`."""
+    return bool(name) and "/" not in name and "\\" not in name and "\0" not in name \
+        and name not in (".", "..")
+
+
 def hypr(lua: str) -> str:
     """Run one Lua statement in the compositor."""
     try:
@@ -657,7 +683,7 @@ def profile_in_use(prefs: Path, comm_name: str) -> bool:
     return False
 
 
-def arm_browser_profile(app: str) -> bool:
+def arm_browser_profile(app: str, profile: str = "Default") -> bool:
     """Make the profile restore its own session on the next launch.
 
     This is the single most important write in the whole restore, and it took a
@@ -673,7 +699,12 @@ def arm_browser_profile(app: str) -> bool:
     refusal when the browser is running.
     """
     spec = BROWSERS[app]
-    prefs = Path(spec["profile"]).expanduser()
+    # The name comes from the session file or Local State: one plain folder
+    # name inside the browser's directory, or nothing gets written.
+    if not valid_profile(profile):
+        print(f"  ! ignoring browser profile {profile!r}: not a profile folder name")
+        return False
+    prefs = profile_root(app) / profile / "Preferences"
     if not prefs.is_file():
         return False
 
@@ -757,7 +788,7 @@ def repair_browser_session(app: str, want: int) -> None:
 
 
 def browser_command(command: str, *, restore_session: bool = True,
-                    new_window: bool = False) -> str:
+                    new_window: bool = False, profile: str | None = None) -> str:
     """Build a browser command without duplicating mutually exclusive flags."""
     argv = shlex.split(command)
     effective = skip_env_wrapper(argv)
@@ -767,6 +798,9 @@ def browser_command(command: str, *, restore_session: bool = True,
     boundary = next((i for i, arg in enumerate(effective) if arg == "--"), len(effective))
     head, tail = effective[:boundary], effective[boundary:]
     head = [arg for arg in head if arg != "--new-window"]
+    if profile is not None:
+        head = [arg for arg in head if not arg.startswith("--profile-directory")]
+        head.append(f"--profile-directory={profile}")
     for flag in ("--restore-last-session", "--no-first-run", "--no-default-browser-check"):
         head = [arg for arg in head if arg != flag]
     if restore_session:
@@ -808,14 +842,31 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
         found = wait_for_existing_browser(app)
         live_browser = True
     else:
-        print(f"[browser] {app}: {want} window(s) -- requesting its saved session")
-        if not arm_browser_profile(app):
+        # Every profile that had a window, not just Default: a plain launch
+        # restores only the last-used profile, and the rest come back empty or
+        # not at all. The save records the list; Local State is the fallback.
+        saved = specs[0].get("browser_profiles")
+        profiles = ([p for p in saved.split(",") if p] if isinstance(saved, str)
+                    else last_active_profiles(app)) or ["Default"]
+        print(f"[browser] {app}: {want} window(s) in {len(profiles)} profile(s) "
+              f"-- requesting their saved sessions")
+        armed = [p for p in profiles if arm_browser_profile(app, p)]
+        if not armed:
             print(f"  ! no profile for {app}, falling back to per-window launch")
             return sum(restore(s, claimed, i, want) for i, s in enumerate(specs, 1))
-        repair_browser_session(app, want)
+        # The repair reads Default's session and counts every saved window, so
+        # it is only right when Default is the one profile being restored.
+        if armed == ["Default"]:
+            repair_browser_session(app, want)
+        elif app in SESSION_REPAIR_BROWSERS:
+            print(f"  {app} session: left as is: {len(armed)} profiles restored")
         known = {c["address"] for c in mapped()} | claimed
-        cmd = browser_command(raw_cmd)
-        dispatch("exec_cmd", f"uwsm app -- {cmd}")
+        for i, profile in enumerate(armed):
+            cmd = browser_command(raw_cmd, profile=profile)
+            dispatch("exec_cmd", f"uwsm app -- {cmd}")
+            # The first launch starts the browser; the rest are handed to it.
+            # Launched back to back, the later ones can land before it listens.
+            time.sleep(4.0 if i == 0 else 1.0)
 
         # Wait for the browser to reopen what it intends to -- but stop as soon
         # as it settles. A fixed wait burns the whole timeout whenever the

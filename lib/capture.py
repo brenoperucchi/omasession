@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resolve as R  # noqa: E402
+import replay  # noqa: E402
 
 
 def hyprctl_json(*args) -> object:
@@ -177,6 +178,9 @@ def capture(name: str = "last", clients: object | None = None) -> str:
     doc = [f'[session]\nname = {toml_str(name)}\ntimestamp = {int(time.time())}\n']
     programs = program_windows(windows, allowed_programs())
     orders = slot_orders(windows, layout_slot_order())
+    profiles = {app: ",".join(replay.last_active_profiles(app))
+                for app in replay.BROWSERS
+                if any(c.get("class") == app for c in windows)}
 
     for c in windows:
         klass = c.get("class", "")
@@ -201,6 +205,8 @@ def capture(name: str = "last", clients: object | None = None) -> str:
             "size": c.get("size"),
             "cwd": result.get("cwd"),
             "order": orders.get(c.get("address", "")),
+            # The browser's open profiles, so a restore reopens all of them.
+            "browser_profiles": profiles.get(klass) or None,
         }
         doc.append(window_toml(fields))
 

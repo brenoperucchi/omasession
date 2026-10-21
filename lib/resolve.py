@@ -473,11 +473,18 @@ def child_command_start(argv: list[str]) -> int | None:
 # class of "<browser>-<host>_<path>-<profile>", with every "/" in the path and
 # the space in "Profile 4" turned into "_": `brave --profile-directory="Profile
 # 4" --app=https://x.com/` shows up as "brave-x.com__-Profile_4". The class is
-# all there is to name it by -- the window shares its process and command line
-# with every other window of the browser.
+# all there is to relaunch it from -- the window shares its process and command
+# line with every other window of the browser.
 APP_WINDOW = re.compile(
     r"^(?P<browser>brave|chromium|google-chrome|vivaldi|microsoft-edge)-"
     r"(?P<name>[^_]+_.*)-(?P<profile>Default|Profile_\d+|Guest_Profile)$")
+APP_BROWSER_BINARY = {
+    "brave": "brave",
+    "chromium": "chromium",
+    "google-chrome": "google-chrome-stable",
+    "vivaldi": "vivaldi-stable",
+    "microsoft-edge": "microsoft-edge-stable",
+}
 WEBAPP_URL = re.compile(r"(?:--app=|omarchy-launch-webapp\s+)[\"']?(https?://[^\s\"']+)")
 
 
@@ -503,6 +510,37 @@ def app_window_label(klass: str, index: dict[str, dict] | None = None) -> str | 
             return entry["Name"]
     host = name.partition("_")[0]
     return host[4:] if host.startswith("www.") else host
+
+
+def webapp_urls(index: dict[str, dict] | None) -> list[str]:
+    """--app URLs named in desktop entries (Omarchy's web apps among them)."""
+    urls = []
+    for entry in (index or {}).values():
+        match = WEBAPP_URL.search(entry.get("Exec", ""))
+        if match:
+            urls.append(match.group(1))
+    return urls
+
+
+def app_window_argv(klass: str, index: dict[str, dict] | None = None) -> list[str] | None:
+    """How to reopen a Chromium-family app window, from its class alone.
+
+    The URL comes from a desktop entry whose --app URL encodes to the same
+    class when there is one -- exact, query string and all -- and is otherwise
+    read back out of the class, which loses nothing for the usual "host/" or
+    "host/path" app.
+    """
+    match = APP_WINDOW.match(klass)
+    if not match:
+        return None
+    name = match.group("name")
+    url = next((u for u in webapp_urls(index) if app_window_name(u) == name), None)
+    if url is None:
+        host, _, path = name.partition("_")
+        url = f"https://{host}{path.replace('_', '/') or '/'}"
+    profile = match.group("profile").replace("_", " ")
+    return [APP_BROWSER_BINARY[match.group("browser")],
+            f"--profile-directory={profile}", f"--app={url}"]
 
 
 def window_class(window: dict) -> str:
@@ -685,6 +723,13 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
     result = {"class": klass, "pid": pid, "argv": None, "cwd": None,
               "via": "unresolved", "single_instance": klass in SINGLE_INSTANCE,
               "note": ""}
+
+    app_argv = app_window_argv(klass, index)
+    if app_argv:
+        result["argv"] = app_argv
+        result["via"] = "app window"
+        result["note"] = "browser app window, rebuilt from its class"
+        return result
 
     entry = index.get(klass.lower())
     if entry:
