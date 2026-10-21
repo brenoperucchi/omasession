@@ -169,6 +169,19 @@ $OMASESSION status --json     # what the panel itself reads
 $OMASESSION resolve           # which command each current window would resolve to
 ```
 
+## Earlier sessions and named layouts
+
+`last` is what login restores. Each time the desktop's shape changes, a copy
+is also kept as `history-<time>`: every change for 15 minutes, then one per
+15 minutes for 2 hours, one per hour for a day and one per day for a week.
+Save any arrangement under a name of your own and bring it back later:
+
+```
+$OMASESSION save work          # save the current windows as "work"
+$OMASESSION list               # named sessions and history, with ages
+$OMASESSION restore work       # or restore history-20261021-222219
+```
+
 ## Configure
 
 Through the panel's settings, or directly with the same CLI:

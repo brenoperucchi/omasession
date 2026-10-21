@@ -4,6 +4,15 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
+## Unreleased
+
+- A history of earlier sessions. Each save of `last` is also kept as
+  `history-<time>` when the desktop's shape changed (windows, workspaces,
+  slots, commands; not titles), thinned to every change for 15 minutes, one
+  per 15 minutes for 2 hours, one per hour for a day and one per day for a
+  week. `omasession list` shows them with named sessions (`omasession save
+  <name>`); `omasession restore <name>` brings any back.
+
 ## 0.4.1 — 2026-10-21
 
 - The session panel shows window titles, commands and error messages as plain
