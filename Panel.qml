@@ -101,6 +101,9 @@ Panel {
 
   function refresh() {
     if (mockMode) return
+    // The tab that is showing reloads with the status, not only when picked.
+    if (view === "saved") loadSessions()
+    if (view === "layout") loadLayout(layoutName)
     // A writer can finish while status --json is still being read. Queue that
     // refresh instead of dropping it, so the final toggle state is read back.
     if (checking) {
@@ -164,6 +167,115 @@ Panel {
     id: restoreProc
     command: [root.cliPath, "restore"]
     onExited: function(code) { root.refresh() }
+  }
+
+  // ── saved sessions, history and the layout preview ──────────────────────
+  // "windows" (the cards), "layout" (screens drawn to scale) or "saved".
+  property string view: "windows"
+  property var sessions: null          // list --json: { named: [], history: [] }
+  property string layoutName: "last"   // which session the Layout tab draws
+  property var layoutData: null        // layout <name>: monitors, workspaces, windows
+  property string layoutWorkspace: ""
+  property string savedMessage: ""
+
+  function loadSessions() {
+    if (mockMode || listProc.running) return
+    listProc.running = true
+  }
+  function loadLayout(name) {
+    if (mockMode) return
+    layoutName = name
+    layoutProc.running = false
+    layoutProc.command = [root.cliPath, "layout", name]
+    layoutProc.running = true
+  }
+  function previewSession(name) {
+    view = "layout"
+    loadLayout(name)
+  }
+  // Omarchy gives each monitor workspaces 1-10 in blocks of ten (31-40 on the
+  // fourth block); the bar shows 1-10, so the preview does too.
+  function workspaceLabel(id) {
+    var n = parseInt(id)
+    return isNaN(n) ? String(id) : String(((n - 1) % 10) + 1)
+  }
+  // history-20261021-222300 is UTC; show it in local time.
+  function sessionTitle(name) {
+    var m = /^history-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(name)
+    if (!m) return name
+    var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]))
+    return d.toLocaleString(Qt.locale(), "ddd MMM d, h:mm AP")
+  }
+  function agoLabel(sec) {
+    if (sec < 90) return sec + "s ago"
+    if (sec < 5400) return Math.floor(sec / 60) + "m ago"
+    if (sec < 172800) return (sec / 3600).toFixed(1) + "h ago"
+    return Math.floor(sec / 86400) + "d ago"
+  }
+
+  Process {
+    id: listProc
+    command: [root.cliPath, "list", "--json"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try { root.sessions = JSON.parse(String(this.text).trim()) }
+        catch (e) { root.sessions = null }
+      }
+    }
+  }
+
+  Process {
+    id: layoutProc
+    command: [root.cliPath, "layout", "last"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var data = null
+        try { data = JSON.parse(String(this.text).trim()) } catch (e) {}
+        root.layoutData = (data && !data.error) ? data : null
+        if (!root.layoutData) return
+        var spaces = root.layoutData.workspaces || []
+        var shown = ""
+        var mons = root.layoutData.monitors || []
+        for (var i = 0; i < mons.length && shown === ""; i++) {
+          var active = String(mons[i].activeWorkspace)
+          if (spaces.indexOf(active) !== -1) shown = active
+        }
+        if (spaces.indexOf(root.layoutWorkspace) !== -1) shown = root.layoutWorkspace
+        root.layoutWorkspace = shown !== "" ? shown : (spaces.length ? spaces[0] : "")
+      }
+    }
+  }
+
+  Process {
+    id: saveAsProc
+    property string name: ""
+    command: [root.cliPath, "save", name]
+    stderr: StdioCollector {
+      onStreamFinished: {
+        var t = String(this.text).trim()
+        if (t !== "") root.savedMessage = t.split("\n").pop()
+      }
+    }
+    onExited: function(code) {
+      if (code === 0) root.savedMessage = "Saved \"" + saveAsProc.name + "\""
+      root.loadSessions()
+    }
+  }
+
+  Process {
+    id: restoreNamedProc
+    property string name: ""
+    command: [root.cliPath, "restore", name]
+    onExited: function(code) {
+      root.savedMessage = code === 0 ? "Restored \"" + restoreNamedProc.name + "\""
+                                     : "Restore of \"" + restoreNamedProc.name + "\" finished with problems"
+      root.refresh()
+    }
+  }
+
+  onViewChanged: {
+    if (view === "saved") loadSessions()
+    if (view === "layout" && layoutData === null) loadLayout(layoutName)
   }
 
   Process {
@@ -665,7 +777,8 @@ Panel {
                     bordered: true
                     focusable: true
                     enabled: !root.mockMode && !restoreProc.running
-                             && !browserRestoreProc.running
+                             && !browserRestoreProc.running && !restoreNamedProc.running
+                             && !ghosttyRestoreProc.running
                     onClicked: restoreProc.running = true
                   }
                 }
@@ -762,6 +875,7 @@ Panel {
                                && root.chromeInstalled && root.chromeCaptured
                                && !browserRestoreProc.running && !ghosttyRestoreProc.running
                                && !restoreProc.running && !saveProc.running
+                               && !restoreNamedProc.running
                       onClicked: {
                         root.browserRestoreOutput = ""
                         root.browserRestoreError = ""
@@ -838,6 +952,7 @@ Panel {
                                && root.ghosttyInstalled && root.ghosttyCaptured
                                && !ghosttyRestoreProc.running && !browserRestoreProc.running
                                && !restoreProc.running && !saveProc.running
+                               && !restoreNamedProc.running
                       onClicked: {
                         root.browserRestoreOutput = ""
                         root.browserRestoreError = ""
@@ -922,8 +1037,282 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
+            ButtonGroup {
+              id: viewTabs
+              visible: root.mockMode || !root.cliMissing
+              options: [
+                { value: "windows", label: "Windows" },
+                { value: "layout", label: "Layout" },
+                { value: "saved", label: "Saved" }
+              ]
+              value: root.view
+              foreground: root.fg
+              fontSize: Style.font.caption
+              onChanged: function(v) { root.view = v }
+            }
+
+            // ── Layout: the screens to scale, one workspace at a time ─────────
+            Column {
+              id: layoutView
+              visible: root.view === "layout"
+              width: bodyScroll.width
+              spacing: Style.spacing.sm
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                elide: Text.ElideRight
+                color: root.dim
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                text: root.layoutData === null
+                      ? (layoutProc.running ? "Loading…" : "Nothing saved to draw yet")
+                      : (root.layoutName === "last" ? "Current save" : root.sessionTitle(root.layoutName))
+                        + (root.layoutName !== "last" ? "  ·  Back to current" : "")
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: root.layoutName !== "last"
+                  cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                  onClicked: root.loadLayout("last")
+                }
+              }
+
+              Flow {
+                width: parent.width
+                spacing: Style.spacing.xs
+                visible: root.layoutData !== null
+                Repeater {
+                  model: root.layoutData ? root.layoutData.workspaces : []
+                  Button {
+                    text: root.workspaceLabel(modelData)
+                    bordered: true
+                    focusable: true
+                    selected: root.layoutWorkspace === modelData
+                    onClicked: root.layoutWorkspace = modelData
+                  }
+                }
+              }
+
+              // The screens. Every monitor box is in Hyprland's layout space
+              // (logical pixels, already turned for rotation), so one scale
+              // factor draws an ultrawide, a row of monitors or a portrait
+              // screen in true proportion.
+              Item {
+                id: screenMap
+                visible: root.layoutData !== null
+                width: parent.width
+                readonly property var mons: root.layoutData ? root.layoutData.monitors : []
+                readonly property real minX: mons.length ? Math.min.apply(null, mons.map(function(m) { return m.box.x })) : 0
+                readonly property real minY: mons.length ? Math.min.apply(null, mons.map(function(m) { return m.box.y })) : 0
+                readonly property real spanW: mons.length ? Math.max.apply(null, mons.map(function(m) { return m.box.x + m.box.w })) - minX : 1
+                readonly property real spanH: mons.length ? Math.max.apply(null, mons.map(function(m) { return m.box.y + m.box.h })) - minY : 1
+                readonly property real scale: Math.min(width / Math.max(spanW, 1), Style.space(260) / Math.max(spanH, 1))
+                height: spanH * scale
+
+                Repeater {
+                  model: screenMap.mons
+                  Rectangle {
+                    x: (modelData.box.x - screenMap.minX) * screenMap.scale
+                    y: (modelData.box.y - screenMap.minY) * screenMap.scale
+                    width: modelData.box.w * screenMap.scale
+                    height: modelData.box.h * screenMap.scale
+                    radius: Style.space(3)
+                    color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.03)
+                    border.width: 1
+                    border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.25)
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.right: parent.right
+                      anchors.bottom: parent.bottom
+                      anchors.margins: Style.space(3)
+                      text: (modelData.name || "") + (modelData.transform % 2 === 1 ? " · rotated" : "")
+                      color: root.dim
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+
+                Repeater {
+                  model: root.layoutData
+                         ? root.layoutData.windows.filter(function(w) { return w.workspace === root.layoutWorkspace })
+                         : []
+                  Rectangle {
+                    x: (modelData.box.x - screenMap.minX) * screenMap.scale
+                    y: (modelData.box.y - screenMap.minY) * screenMap.scale
+                    width: Math.max(modelData.box.w * screenMap.scale, 4)
+                    height: Math.max(modelData.box.h * screenMap.scale, 4)
+                    radius: Style.space(2)
+                    color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, modelData.floating ? 0.10 : 0.18)
+                    border.width: modelData.floating ? 2 : 1
+                    border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.8)
+                    clip: true
+                    Column {
+                      anchors.fill: parent
+                      anchors.margins: Style.space(4)
+                      spacing: 1
+                      Text {
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: modelData.label + (modelData.floating ? " (floating)" : "")
+                        color: root.fg
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+                      Text {
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: modelData.title
+                        color: root.dim
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // ── Saved: named layouts, history, save as ───────────────────────
+            Column {
+              id: savedView
+              visible: root.view === "saved"
+              width: bodyScroll.width
+              spacing: Style.spacing.sm
+
+              Row {
+                width: parent.width
+                spacing: Style.spacing.sm
+                TextField {
+                  id: saveAsField
+                  width: parent.width - saveAsButton.width - parent.spacing
+                  placeholderText: "Name this layout (e.g. work)"
+                  foreground: root.fg
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  onAccepted: if (saveAsButton.enabled) saveAsButton.clicked()
+                }
+                Button {
+                  id: saveAsButton
+                  text: "Save as"
+                  bordered: true
+                  focusable: true
+                  enabled: !root.mockMode && !saveAsProc.running
+                           && !restoreProc.running && !restoreNamedProc.running
+                           && /^[A-Za-z0-9][A-Za-z0-9 _-]{0,40}$/.test(saveAsField.text.trim())
+                  onClicked: {
+                    saveAsProc.name = saveAsField.text.trim()
+                    root.savedMessage = ""
+                    saveAsProc.running = true
+                    saveAsField.text = ""
+                  }
+                }
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                visible: text !== ""
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: root.savedMessage
+                color: root.dim
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              Repeater {
+                model: [
+                  { title: "Saved layouts", rows: root.sessions ? root.sessions.named : [], empty: "None yet. Name the current windows above." },
+                  { title: "History", rows: root.sessions ? root.sessions.history : [], empty: listProc.running ? "Loading…" : "Nothing yet." }
+                ]
+                Column {
+                  width: savedView.width
+                  spacing: Style.spacing.xs
+                  Text {
+                    textFormat: Text.PlainText
+                    text: modelData.title
+                    color: Color.accent
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    visible: modelData.rows.length === 0
+                    text: modelData.empty
+                    color: root.dim
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                  Repeater {
+                    model: modelData.rows
+                    Rectangle {
+                      width: savedView.width
+                      height: Math.max(rowText.implicitHeight, previewButton.implicitHeight) + Style.space(10)
+                      radius: Style.space(3)
+                      color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+                      Column {
+                        id: rowText
+                        anchors.left: parent.left
+                        anchors.right: previewButton.left
+                        anchors.leftMargin: Style.space(8)
+                        anchors.rightMargin: Style.spacing.sm
+                        anchors.verticalCenter: parent.verticalCenter
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          elide: Text.ElideRight
+                          text: root.sessionTitle(modelData.name)
+                          color: root.fg
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.body
+                        }
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          elide: Text.ElideRight
+                          text: modelData.windows + " windows · " + root.agoLabel(modelData.agoSec)
+                          color: root.dim
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                        }
+                      }
+                      Button {
+                        id: previewButton
+                        anchors.right: restoreButton.left
+                        anchors.rightMargin: Style.spacing.xs
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Preview"
+                        bordered: true
+                        focusable: true
+                        onClicked: root.previewSession(modelData.name)
+                      }
+                      Button {
+                        id: restoreButton
+                        anchors.right: parent.right
+                        anchors.rightMargin: Style.space(6)
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Restore"
+                        bordered: true
+                        focusable: true
+                        enabled: !root.mockMode && !restoreNamedProc.running && !restoreProc.running
+                                 && !browserRestoreProc.running && !ghosttyRestoreProc.running
+                        onClicked: {
+                          restoreNamedProc.name = modelData.name
+                          root.savedMessage = "Restoring \"" + modelData.name + "\"…"
+                          restoreNamedProc.running = true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
             Column {
               id: monitorList
+              visible: root.view === "windows"
               width: bodyScroll.width
               spacing: Style.spacing.lg
 

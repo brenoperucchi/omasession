@@ -403,7 +403,10 @@ jq --arg when "$(date -u +%FT%TZ)" --arg gen "$GENERATION" \
     generation: $gen,
     partial: ($partial == 1),
     windowsWritten: $written,
-    monitors: [ $mons[]? | {id, name, description} ],
+    # Geometry too, so a preview can draw the screens as they were: position in
+    # the layout, size in pixels, scale, rotation (transform), shown workspace.
+    monitors: [ $mons[]? | {id, name, description, x, y, width, height, scale,
+                           transform, activeWorkspace: .activeWorkspace.id} ],
     windows: [ .[]
         | select(.mapped) | select(.workspace.id > 0)
         | . as $w

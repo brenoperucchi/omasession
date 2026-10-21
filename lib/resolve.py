@@ -507,6 +507,21 @@ def webapp_urls(index: dict[str, dict] | None) -> list[str]:
     return urls
 
 
+def app_window_label(klass: str, index: dict[str, dict] | None = None) -> str | None:
+    """A person's name for an app window: its desktop entry's Name ("X"),
+    else its site ("x.com"); None if `klass` is not an app window."""
+    match = APP_WINDOW.match(klass)
+    if not match:
+        return None
+    name = match.group("name")
+    for entry in (index or {}).values():
+        url = WEBAPP_URL.search(entry.get("Exec", ""))
+        if url and app_window_name(url.group(1)) == name and entry.get("Name"):
+            return entry["Name"]
+    host = name.partition("_")[0]
+    return host[4:] if host.startswith("www.") else host
+
+
 def app_window_argv(klass: str, index: dict[str, dict] | None = None) -> list[str] | None:
     """How to reopen a Chromium-family app window, from its class alone.
 

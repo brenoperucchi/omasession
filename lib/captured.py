@@ -53,9 +53,21 @@ FRIENDLY = {
 }
 
 
+_DESKTOP_INDEX: dict | None = None
+
+
 def friendly(klass: str) -> str:
     if klass in FRIENDLY:
         return FRIENDLY[klass]
+    # A browser app window ("brave-x.com__-Profile_4") is named for its site,
+    # not for the tail of its class ("Com Profile 4").
+    global _DESKTOP_INDEX
+    if R.APP_WINDOW.match(klass):
+        if _DESKTOP_INDEX is None:
+            _DESKTOP_INDEX = R.desktop_index()
+        label = R.app_window_label(klass, _DESKTOP_INDEX)
+        if label:
+            return label
     tail = klass.split(".")[-1].replace("-", " ").replace("_", " ")
     return " ".join(w[:1].upper() + w[1:] for w in tail.split() if w) or klass
 
@@ -84,6 +96,24 @@ def resolvable_map(toml_path: Path) -> dict[tuple[str, object], int]:
     return counts
 
 
+def program_map(toml_path: Path) -> dict[tuple[str, str], list[str]]:
+    """Per (class, workspace): the program each saved terminal relaunches in
+    itself ("btop" for `ghostty -e btop`), in file order."""
+    found: dict[tuple[str, str], list[str]] = {}
+    try:
+        windows = tomllib.loads(_read_capped(toml_path)).get("window", [])
+    except (OSError, tomllib.TOMLDecodeError, ValueError):
+        return found
+    for w in windows:
+        cmd = w.get("launch_cmd") or ""
+        for flag in (" -e ", " -- "):
+            if flag in cmd:
+                program = Path(cmd.split(flag, 1)[1].split()[0].strip("'\"")).name
+                found.setdefault((w.get("app_id", ""), str(w.get("workspace", ""))), []).append(program)
+                break
+    return found
+
+
 def main() -> int:
     path = Path(sys.argv[1])
     toml_path = Path(sys.argv[2]) if len(sys.argv) > 2 else None
@@ -97,6 +127,7 @@ def main() -> int:
     # seria o defeito que este arquivo existe para evitar.
     counts = resolvable_map(toml_path) if toml_path else {}
     remaining = dict(counts)
+    programs = program_map(toml_path) if toml_path else {}
 
     out = []
     for w in windows:
@@ -110,6 +141,11 @@ def main() -> int:
         detail = w.get("cwd") or ""
         if not detail and klass in BROWSER_CLASSES:
             detail = "tabs restored by the browser"
+        # A terminal saved with its program (`ghostty -e btop`) comes back
+        # running it; where its shell was is beside the point.
+        program = (programs.get(key) or [None]).pop(0) if programs.get(key) else None
+        if program:
+            detail = "runs " + program
 
         out.append({
             "ws": w.get("workspace"),
@@ -119,7 +155,7 @@ def main() -> int:
             "title": w.get("title", ""),
             "resolvable": resolvable,
             "detail": detail,
-            "warn": ("" if w.get("cwd") or not w.get("cwdNote")
+            "warn": ("" if w.get("cwd") or program or not w.get("cwdNote")
                      else "directory not recoverable"),
         })
     json.dump(out, sys.stdout)
