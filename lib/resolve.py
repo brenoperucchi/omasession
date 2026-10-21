@@ -469,6 +469,42 @@ def child_command_start(argv: list[str]) -> int | None:
     return None
 
 
+# Chromium-family app windows (`--app=URL`, Omarchy's web apps) get a Wayland
+# class of "<browser>-<host>_<path>-<profile>", with every "/" in the path and
+# the space in "Profile 4" turned into "_": `brave --profile-directory="Profile
+# 4" --app=https://x.com/` shows up as "brave-x.com__-Profile_4". The class is
+# all there is to name it by -- the window shares its process and command line
+# with every other window of the browser.
+APP_WINDOW = re.compile(
+    r"^(?P<browser>brave|chromium|google-chrome|vivaldi|microsoft-edge)-"
+    r"(?P<name>[^_]+_.*)-(?P<profile>Default|Profile_\d+|Guest_Profile)$")
+WEBAPP_URL = re.compile(r"(?:--app=|omarchy-launch-webapp\s+)[\"']?(https?://[^\s\"']+)")
+
+
+def app_window_name(url: str) -> str | None:
+    """The "<host>_<path>" part of an app window's class for `url`."""
+    match = re.match(r"^https?://([^/?#]+)([^?#]*)", url)
+    if not match:
+        return None
+    host, path = match.group(1), match.group(2) or "/"
+    return (host + "_" + path).replace("/", "_")
+
+
+def app_window_label(klass: str, index: dict[str, dict] | None = None) -> str | None:
+    """A person's name for an app window: its desktop entry's Name ("X"),
+    else its site ("x.com"); None if `klass` is not an app window."""
+    match = APP_WINDOW.match(klass)
+    if not match:
+        return None
+    name = match.group("name")
+    for entry in (index or {}).values():
+        url = WEBAPP_URL.search(entry.get("Exec", ""))
+        if url and app_window_name(url.group(1)) == name and entry.get("Name"):
+            return entry["Name"]
+    host = name.partition("_")[0]
+    return host[4:] if host.startswith("www.") else host
+
+
 def window_class(window: dict) -> str:
     return window.get("initialClass") or window.get("class") or ""
 
