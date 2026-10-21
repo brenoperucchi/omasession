@@ -47,6 +47,16 @@ geometry are skipped with a diagnostic. This also applies to app-only restores:
 they cannot rebuild just one app's portion of a mixed-app layout. See
 [`docs/tiled-layout.md`](docs/tiled-layout.md) for requirements and testing.
 
+**Layouts that place windows by order.** Lua layouts (`hl.layout.register`)
+and similar layouts put each window in a slot by the order it arrived. Restore
+opens every window on a hidden workspace first, then moves them to their
+workspaces one by one in the order they had. Hyprland does not report that
+order, and its client list keeps creation order after a swap, so a Lua config
+can supply it: define a global `window_slot_order()` that returns JSON like
+`{"3": ["0xaddr", ...]}`, filled from `ctx.targets` in your layout's
+`recalculate`. Without it, the client list order is used. Turn ordering off
+with `restoreOrder false`.
+
 ## How it works
 
 **Resolving what to relaunch.** `lib/resolve.py` answers "what command
@@ -181,6 +191,7 @@ $OMASESSION config set browserRestore true     # let the browser reopen its own 
 $OMASESSION config set browserRepair true      # put reopened browser windows back
 $OMASESSION config set browserRepairChrome true # include Chrome in automatic repair
 $OMASESSION config set appRestoreGhostty true  # include Ghostty on login restore
+$OMASESSION config set restoreOrder true       # reopen windows in their saved slot order
 ```
 
 The panel's **Google Chrome** action runs `restore-app google-chrome`, asking

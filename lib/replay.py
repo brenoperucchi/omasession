@@ -25,6 +25,7 @@ import difflib
 import contextlib
 import json
 import shlex
+import signal
 import re
 import os
 import subprocess
@@ -46,6 +47,16 @@ WINDOW_TIMEOUT = 15.0
 BROWSER_TIMEOUT = 40.0
 BROWSER_QUIET = 10.0    # allow slower profiles to finish native session restore
 SETTLE = 0.4
+
+# Ordered restore. A layout that places windows by the order they arrive -- a
+# Hyprland Lua layout (hl.layout.register), master -- cannot be rebuilt from
+# saved rectangles the way restore_tiled rebuilds dwindle. What it needs is the
+# right arrival order. So while restoring, every window is parked on a hidden
+# special workspace instead of placed, and once all are open they move to their
+# real workspaces one by one in saved slot order (the `order` field written by
+# capture.py). Off with restoreOrder=false.
+STAGING_WORKSPACE = "special:omasession-restore"
+_staged: list[tuple[str, dict, bool]] | None = None
 
 # hl.dsp.window.fullscreen_state takes a mode, not a flag. Hyprland efb50993,
 # src/managers/fullscreen/FullscreenController.hpp:12-15.
@@ -208,6 +219,9 @@ def find_new(known: set[str], timeout: float, app: str | None = None):
 
 def place(addr: str, spec: dict) -> None:
     """Put an already-mapped window where the session file says it belongs."""
+    if _staged is not None:
+        stage(addr, spec, browser=False)
+        return
     sel = f"address:{addr}"
     ws = spec.get("workspace")
     if ws is not None:
@@ -243,6 +257,77 @@ def place(addr: str, spec: dict) -> None:
         # applied under a different meaning than the one they were measured in.
         dispatch("window.move", window=sel, x=pos[0], y=pos[1], exact=True)
         time.sleep(SETTLE)
+
+
+def stage(addr: str, spec: dict, browser: bool) -> None:
+    """Park a restored window until place_staged() puts it in its slot."""
+    dispatch("window.move", window=f"address:{addr}",
+             workspace=STAGING_WORKSPACE, follow=False)
+    time.sleep(SETTLE)
+    _staged.append((addr, spec, browser))
+
+
+def slot_order(spec: dict) -> int:
+    """Saved position among the windows of its workspace; unknown goes last."""
+    order = spec.get("order", spec.get("_spec", {}).get("order"))
+    return order if isinstance(order, int) else 1 << 30
+
+
+def place_staged() -> None:
+    """Move every parked window to its workspace, in saved slot order.
+
+    The sort is stable, so windows without an `order` (an older session file)
+    keep the order they were restored in.
+    """
+    global _staged
+    # A SIGTERM here would stop placement half-way; hold it until every
+    # window is out, then it is delivered as usual.
+    stop = {signal.SIGTERM, signal.SIGHUP}
+    signal.pthread_sigmask(signal.SIG_BLOCK, stop)
+    staged, _staged = _staged or [], None
+    try:
+        for addr, spec, browser in sorted(staged, key=lambda item: slot_order(item[1])):
+            # One failed move must not leave the rest parked.
+            try:
+                if browser:
+                    move_to(addr, spec["workspace"])
+                else:
+                    place(addr, spec)
+            except Exception as exc:
+                print(f"  ! could not place {addr}: {exc}")
+        release_parked({addr: spec.get("workspace") for addr, spec, _ in staged})
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, stop)
+
+
+def release_parked(targets: dict[str, object] | None = None) -> int:
+    """Move anything still on the staging workspace to where it belongs.
+
+    A move the compositor dropped, or a restore killed mid-way, would otherwise
+    leave windows hidden there -- and the next save would not see them. A window
+    with no known target goes to the active workspace. Returns how many moved.
+    """
+    targets = targets or {}
+    moved = 0
+    parked = [c for c in clients()
+              if c.get("workspace", {}).get("name") == STAGING_WORKSPACE]
+    if not parked:
+        return 0
+    try:
+        active = json.loads(subprocess.run(
+            ["hyprctl", "activeworkspace", "-j"], capture_output=True,
+            text=True, timeout=15).stdout)["id"]
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError):
+        active = 1
+    for c in parked:
+        ws = targets.get(c["address"])
+        try:
+            move_to(c["address"], ws if ws is not None else active)
+        except Exception as exc:
+            print(f"  ! could not release {c['address']}: {exc}")
+            continue
+        moved += 1
+    return moved
 
 
 def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
@@ -470,7 +555,10 @@ def browser_targets(app: str, specs: list[dict], titles: list[dict]) -> list[dic
 
 
 def place_browser(addr: str, target: dict) -> None:
-    move_to(addr, target["workspace"])
+    if _staged is not None:
+        stage(addr, target, browser=True)
+    else:
+        move_to(addr, target["workspace"])
     if "_spec" in target:
         target["_spec"]["_restored_address"] = addr
 
@@ -974,14 +1062,25 @@ def main() -> int:
         else:
             plain.append(spec)
 
+    # Windows a killed earlier restore left parked come back first.
+    if release_parked():
+        print("released windows an earlier restore left parked")
+
     claimed: set[str] = set()
     started = time.monotonic()
     ok = 0
-    for app, specs in browser_specs.items():
-        ok += restore_browser(app, specs, title_records, claimed)
-    reserve_existing(plain, mapped())
-    for i, spec in enumerate(plain, start=1):
-        ok += restore(spec, claimed, i, len(plain))
+    global _staged
+    if os.environ.get("OMASESSION_RESTORE_ORDER", "true") != "false":
+        _staged = []
+    try:
+        for app, specs in browser_specs.items():
+            ok += restore_browser(app, specs, title_records, claimed)
+        reserve_existing(plain, mapped())
+        for i, spec in enumerate(plain, start=1):
+            ok += restore(spec, claimed, i, len(plain))
+    finally:
+        # Also on an exception: a window left parked would be hidden for good.
+        place_staged()
     # Retain excluded apps on affected desks for the completeness check. An
     # app-only restore must not stretch half of a saved layout over the desk
     # just because its other apps have not been opened yet.
@@ -1059,5 +1158,13 @@ def run_logged() -> int:
             os.close(log_fd)
 
 
+def exit_on_signal(signum, _frame) -> None:
+    """SIGTERM/SIGHUP (logout, a killed shell) unwind through the finally
+    blocks, so parked windows still get placed."""
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, exit_on_signal)
+    signal.signal(signal.SIGHUP, exit_on_signal)
     sys.exit(run_logged())

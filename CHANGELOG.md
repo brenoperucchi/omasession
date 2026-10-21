@@ -4,6 +4,17 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
+## Unreleased
+
+- Windows come back in their slots on Lua layouts and other layouts that
+  place windows by arrival order. Restore opened each window onto its
+  workspace in snapshot order, so those layouts put windows in the wrong
+  slots, and a swapped window came back unswapped. Each window's position in
+  its workspace is now saved; during restore, windows wait on a hidden
+  workspace and then move in that order. A Lua config can report the real
+  slot order through a global `window_slot_order()` (see the README). Off
+  with `restoreOrder false`.
+
 ## 0.4.1 — 2026-10-21
 
 - The session panel shows window titles, commands and error messages as plain

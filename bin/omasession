@@ -170,6 +170,7 @@ DEFAULT_BROWSER_RESTORE=true
 DEFAULT_BROWSER_REPAIR=true
 DEFAULT_BROWSER_REPAIR_CHROME=true
 DEFAULT_APP_RESTORE_GHOSTTY=true
+DEFAULT_RESTORE_ORDER=true
 
 config_get() { # config_get <key> <default> [raw_json]
     # $3, quando dado, poupa uma leitura de config.json que quem chama já fez
@@ -273,9 +274,20 @@ cmd_restore() {
     # `exec` abaixo troca este shell pelo replay, mas o descritor 9 sobrevive a
     # troca: o lock fica seguro pelo processo do replay e e liberado quando ele
     # termina, inclusive se ele morrer.
-    exec 9>"$SESSION_DIR/.$name.lock"
-    if ! flock -n 9; then
-        die "a save is running -- refusing to restore on top of it"
+    # `>>`, not `>`: opening the lock must never truncate whatever it names.
+    # A timer save takes a few seconds; wait for it rather than fail.
+    exec 9>>"$SESSION_DIR/.$name.lock"
+    if ! flock -w 10 9; then
+        die "a save or restore is running -- refusing to restore on top of it"
+    fi
+    # Restoring another name (`work`, a history snapshot) parks windows just the
+    # same, so the timer's save of `last` has to wait for it too -- otherwise it
+    # can publish the half-restored desktop over `last`.
+    if [[ "$name" != last ]]; then
+        exec 8>>"$SESSION_DIR/.last.lock"
+        if ! flock -w 10 8; then
+            die "a save or restore is running -- refusing to restore on top of it"
+        fi
     fi
 
     # browserRestore ainda nao e respeitado: replay.py nao le a opcao. Dizer
@@ -285,9 +297,12 @@ cmd_restore() {
     if [[ "$(config_get browserRestore "$DEFAULT_BROWSER_RESTORE")" == "false" ]]; then
         err "browserRestore=false ainda nao e respeitado; os browsers vao reabrir suas janelas"
     fi
-    local restore_ghostty
+    local restore_ghostty restore_order
     restore_ghostty="$(config_get appRestoreGhostty "$DEFAULT_APP_RESTORE_GHOSTTY")"
+    # restoreOrder: put windows back in their saved slot order (replay.py).
+    restore_order="$(config_get restoreOrder "$DEFAULT_RESTORE_ORDER")"
     OMASESSION_APP_RESTORE_GHOSTTY="$restore_ghostty" \
+    OMASESSION_RESTORE_ORDER="$restore_order" \
         exec python3 "$LIB/replay.py" "$SESSION_DIR/$name.toml"
 }
 
