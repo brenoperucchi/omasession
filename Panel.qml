@@ -455,6 +455,7 @@ Panel {
                 spacing: Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "OmaSession"
                   width: Math.min(implicitWidth,
                                   Math.max(0, parent.width - versionText.implicitWidth - parent.spacing))
@@ -466,6 +467,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   id: versionText
                   text: root.pluginVersion
                   color: root.dim
@@ -476,6 +478,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: root.cliMissing     ? "CLI NOT INSTALLED"
                     : !root.status        ? "NOTHING SAVED YET"
@@ -547,6 +550,7 @@ Panel {
               radius: Style.space(3)
               color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
               Text {
+                textFormat: Text.PlainText
                 id: missingText
                 anchors.left: parent.left; anchors.right: parent.right
                 anchors.margins: Style.space(6)
@@ -567,6 +571,7 @@ Panel {
               radius: Style.space(3)
               color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
               Text {
+                textFormat: Text.PlainText
                 id: errorText
                 anchors.left: parent.left; anchors.right: parent.right
                 anchors.margins: Style.space(6)
@@ -597,6 +602,7 @@ Panel {
                 spacing: Style.spacing.md
 
                 Text {
+                  textFormat: Text.PlainText
                   text: root.comingBack === root.windowCount
                         ? "All " + root.windowCount + " come back"
                         : root.comingBack + " of " + root.windowCount + " come back"
@@ -630,6 +636,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   wrapMode: Text.WordWrap
                   text: root.workspaceCount
@@ -672,6 +679,7 @@ Panel {
               radius: Style.space(3)
               color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.14)
               Text {
+                textFormat: Text.PlainText
                 id: refusedText
                 anchors.left: parent.left; anchors.right: parent.right
                 anchors.margins: Style.space(6)
@@ -704,6 +712,7 @@ Panel {
                 spacing: Style.spacing.sm
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Restore App Windows"
                   color: root.fg
                   font.family: Style.font.family
@@ -870,6 +879,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   wrapMode: Text.WordWrap
                   text: (!root.chromeInstalled ? "Chrome unavailable"
@@ -885,6 +895,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   visible: root.browserRestoreOutput !== "" || root.browserRestoreError !== ""
                             || root.ghosttyRestoreOutput !== "" || root.ghosttyRestoreError !== ""
@@ -903,6 +914,7 @@ Panel {
 
             // ── restart restoration ────────────────────────────────────────
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: "Restore Windows on Restart"
               color: root.fg
@@ -923,6 +935,7 @@ Panel {
                   spacing: Style.spacing.sm
 
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.multiMonitor
                     text: modelData.mon
                     color: Color.accent
@@ -955,6 +968,7 @@ Panel {
                           spacing: Style.spacing.xxs
 
                           Text {
+                            textFormat: Text.PlainText
                             width: parent.width
                             elide: Text.ElideRight
                             text: modelData.app
@@ -963,6 +977,7 @@ Panel {
                             font.pixelSize: Style.font.body
                           }
                           Text {
+                            textFormat: Text.PlainText
                             width: parent.width
                             elide: Text.ElideRight
                             text: "ws" + modelData.ws + " · " + (modelData.detail || modelData.title)
@@ -971,6 +986,7 @@ Panel {
                             font.pixelSize: Style.font.caption
                           }
                           Text {
+                            textFormat: Text.PlainText
                             width: parent.width
                             elide: Text.ElideRight
                             visible: text !== ""
@@ -998,6 +1014,7 @@ Panel {
           PanelSeparator { width: parent.width; visible: root.mockMode || !root.cliMissing }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.mockMode || !root.cliMissing
             width: parent.width
             wrapMode: Text.WordWrap

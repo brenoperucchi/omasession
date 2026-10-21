@@ -11,7 +11,31 @@ from pathlib import Path
 PANEL = Path(__file__).resolve().parents[1] / "Panel.qml"
 
 
+def text_blocks(source: str) -> list[tuple[int, str]]:
+    """(line, body) of every QML `Text { ... }`, nested blocks included."""
+    blocks = []
+    for match in re.finditer(r"\bText\s*\{", source):
+        depth, end = 1, match.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(source[end], 0)
+            end += 1
+        blocks.append((source.count("\n", 0, match.start()) + 1,
+                       source[match.end():end - 1]))
+    return blocks
+
+
 class PanelCases(unittest.TestCase):
+    def test_every_text_is_plain_so_titles_cannot_inject_markup(self) -> None:
+        # Marketplace review (omarchy-plugin-marketplace#7522): a saved window
+        # title reaches a Text with the default AutoText format, so a title
+        # holding <img src=...> made the panel fetch a remote image.
+        source = PANEL.read_text(encoding="utf-8")
+        blocks = text_blocks(source)
+        self.assertGreater(len(blocks), 10)
+        for line, body in blocks:
+            with self.subTest(line=line):
+                self.assertRegex(body, r"\btextFormat:\s*Text\.PlainText\b")
+
     def test_app_toggles_are_blocked_when_the_cli_is_unavailable(self) -> None:
         source = PANEL.read_text(encoding="utf-8")
         for toggle_id in ("chromeToggle", "ghosttyToggle"):
