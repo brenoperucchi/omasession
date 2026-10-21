@@ -46,7 +46,7 @@ Panel {
 
   readonly property string cliPath:
     Quickshell.env("HOME") + "/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession"
-  readonly property string pluginVersion: "0.4.0"
+  readonly property string pluginVersion: "0.4.1"
 
   readonly property var mock: ({
     "healthy": {

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "brenoperucchi.omasession",
   "name": "OmaSession",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "author": "brenoperucchi",
   "license": "MIT",
   "description": "Reopens the windows you had open, on the workspaces they were on, after a reboot or a crash -- speaking the Lua IPC that Hyprland 0.56 actually accepts.",

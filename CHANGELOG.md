@@ -4,6 +4,17 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
+## 0.4.1 — 2026-10-21
+
+- The session panel shows window titles, commands and error messages as plain
+  text. A saved window title containing markup, such as an image tag, could
+  make the panel load a remote image when it was opened. Reported in the
+  Omarchy plugin marketplace review.
+- Chromium and Electron windows saved through the /proc cmdline fallback now
+  restore. Their rewritten process title was saved as one quoted word, and
+  uwsm failed with `Path "<whole command line>" does not exist!`.
+  Contributed by @paracycle in #4 (#3).
+
 ## 0.4.0 — 2026-10-21
 
 - Restores Dwindle tiled layouts from the saved window geometry. After the
