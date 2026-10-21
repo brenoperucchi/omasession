@@ -6,6 +6,16 @@ request.
 
 ## Unreleased
 
+- Every browser profile that had a window comes back, not only Default. The
+  save records the browser's open profiles (Local State
+  `last_active_profiles`); restore marks each as cleanly closed and launches
+  each with `--profile-directory`. Before, only Default reopened and the other
+  profiles' windows were lost or came back empty.
+- Browser app windows (`--app=URL`, including Omarchy's web apps) reopen on
+  their own profile and URL, rebuilt from the window class
+  (`brave-x.com__-Profile_4`). Before, they were saved with the browser's
+  shared command line and reopened as a normal browser window.
+
 - A terminal can come back running the program it had open instead of a bare
   shell. List programs with `terminalPrograms` (for example `nvim,btop`);
   only listed ones are relaunched, since rerunning whatever was in the
