@@ -6,6 +6,13 @@ request.
 
 ## Unreleased
 
+- A terminal can come back running the program it had open instead of a bare
+  shell. List programs with `terminalPrograms` (for example `nvim,btop`);
+  only listed ones are relaunched, since rerunning whatever was in the
+  foreground could repeat a build or a delete. When one Ghostty process
+  serves several windows, each program goes to the window whose title names
+  it, then by elimination. Works with Ghostty (`-e`), foot and kitty (`--`).
+
 - Windows come back in their slots on Lua layouts and other layouts that
   place windows by arrival order. Restore opened each window onto its
   workspace in snapshot order, so those layouts put windows in the wrong

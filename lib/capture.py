@@ -21,6 +21,8 @@ caller decides where the result goes, same as before.
 """
 
 import json
+import os
+import re
 import subprocess
 import sys
 import time
@@ -115,6 +117,52 @@ def slot_orders(windows: list[dict], layout_order: dict[str, list[str]]) -> dict
     return result
 
 
+def allowed_programs() -> set[str]:
+    """terminalPrograms config, passed in by `omasession save` as a comma list."""
+    raw = os.environ.get("OMASESSION_TERMINAL_PROGRAMS", "")
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def program_windows(windows: list[dict], allowed: set[str]) -> dict[str, dict]:
+    """Which listed program each terminal window was running, by address.
+
+    One terminal process can serve several windows (Ghostty does by default),
+    and nothing ties a window to its shell. So: a window whose title names the
+    program gets it; then, if exactly one window and one program are left over
+    in that process, they belong together. Anything still ambiguous gets no
+    program -- it comes back as a plain terminal, as before.
+    """
+    result: dict[str, dict] = {}
+    by_pid: dict[int, list[dict]] = {}
+    for c in windows:
+        if c.get("pid"):
+            by_pid.setdefault(int(c["pid"]), []).append(c)
+    for pid, wins in by_pid.items():
+        programs = R.terminal_programs(pid, allowed)
+        if not programs:
+            continue
+        left = list(wins)
+        names = [p["name"].lower() for p in programs]
+
+        def names_in(title: str) -> set[str]:
+            return {n for n in names
+                    if re.search(rf"(?<![\w.-]){re.escape(n)}(?![\w.-])", title, re.I)}
+
+        for program in list(programs):
+            # Two of the same program in one process, or a title naming two
+            # programs: the title cannot say which is which, so no match.
+            if names.count(program["name"].lower()) > 1:
+                continue
+            named = [w for w in left if names_in(w.get("title", "")) == {program["name"].lower()}]
+            if len(named) == 1:
+                result[named[0].get("address", "")] = program
+                left.remove(named[0])
+                programs.remove(program)
+        if len(left) == 1 and len(programs) == 1:
+            result[left[0].get("address", "")] = programs[0]
+    return result
+
+
 def capture(name: str = "last", clients: object | None = None) -> str:
     if clients is None:
         clients = hyprctl_json("clients")
@@ -128,10 +176,17 @@ def capture(name: str = "last", clients: object | None = None) -> str:
 
     doc = [f'[session]\nname = {toml_str(name)}\ntimestamp = {int(time.time())}\n']
     orders = slot_orders(windows, layout_slot_order())
+    programs = program_windows(windows, allowed_programs())
 
     for c in windows:
         klass = c.get("class", "")
         result = R.resolve({**c, "initialClass": c.get("initialClass") or klass}, index)
+        program = programs.get(c.get("address", ""))
+        if program and result.get("argv"):
+            argv = R.with_program(result["argv"], program)
+            if argv:
+                result["argv"] = argv
+                result["cwd"] = program.get("cwd") or result.get("cwd")
         cmd = R.command(result)
 
         fields = {
