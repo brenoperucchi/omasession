@@ -547,6 +547,101 @@ def ghostty_argv(argv: list[str], cwd: str | None) -> list[str]:
     return prefix + [effective[0]] + flags + clean + tail
 
 
+# How each terminal binary is told to run a program instead of a shell.
+# ghostty measured here (`ghostty -e flockr` relaunches the program in its own
+# window); foot and kitty take it after `--`, as TRAILING_ARGV_TERMINALS notes.
+TERMINAL_EXEC_FLAG = {"ghostty": "-e", "foot": "--", "kitty": "--"}
+
+
+def terminal_programs(pid: int, allowed: set[str]) -> list[dict]:
+    """Programs from `allowed` running in a terminal's shells, one per shell.
+
+    A terminal window's shell is a direct child of the terminal process; what
+    the user left running is that shell's child (`ghostty -> bash -> flockr`).
+    Only programs the user listed count: relaunching whatever happened to be in
+    the foreground -- a build, an `rm` -- would run it again at login. Each hit
+    is {"shell", "name", "argv", "cwd"}; matching it to a window is the
+    caller's job, because one terminal process can serve several windows.
+    """
+    found = []
+    if not allowed:
+        return found
+
+    def listed(kid: str, shell: str | None) -> dict | None:
+        argv = from_cmdline(int(kid))
+        name = Path(argv[0]).name if argv else _comm(kid)
+        if name not in allowed:
+            return None
+        try:
+            cwd = os.readlink(f"/proc/{kid}/cwd")
+        except OSError:
+            cwd = None
+        return {"shell": shell, "name": name, "argv": argv or [name], "cwd": cwd}
+
+    for child in _children(pid):
+        if _comm(child) in SHELLS:
+            for kid in _children(child):
+                hit = listed(kid, child)
+                if hit:
+                    found.append(hit)
+                    break
+        else:
+            # A terminal started with `-e program` (as a restore does) runs it
+            # directly, with no shell in between.
+            hit = listed(child, None)
+            if hit:
+                found.append(hit)
+    return found
+
+
+def with_program(argv: list[str], program: dict) -> list[str] | None:
+    """`argv` (a resolved terminal launch) changed to run `program` in it.
+
+    None when the terminal is not one we know how to hand a command to, or the
+    launch already runs something of its own -- that command is left alone.
+    """
+    effective = skip_env_wrapper(argv)
+    if not effective:
+        return None
+    binary = Path(effective[0]).name
+    flag = TERMINAL_EXEC_FLAG.get(binary)
+    if flag is None or child_command_start(effective) is not None:
+        return None
+    if binary == "ghostty":
+        if any(a in ("-e", "--command", "--") for a in effective):
+            return None
+        argv = ghostty_argv(argv, program.get("cwd"))
+    elif program.get("cwd") and binary in CWD_OPTIONS and os.path.isdir(program["cwd"]):
+        # The program may have changed directory since the terminal opened:
+        # its own directory replaces the one the terminal was started with.
+        argv = drop_cwd_option(argv, binary) + [f"{CWD_OPTIONS[binary][0]}={program['cwd']}"]
+    return argv + [flag] + program["argv"]
+
+
+CWD_OPTIONS = {"foot": ("--working-directory", "-D"), "kitty": ("--directory", "-d")}
+
+
+def drop_cwd_option(argv: list[str], binary: str) -> list[str]:
+    """`argv` without the terminal's working-directory option and its value.
+
+    Only the exact `--opt=value`, `--opt value` and `-D value` forms: a token
+    that merely starts with `-D` may be another option's value (a title).
+    """
+    long, short = CWD_OPTIONS[binary]
+    out, skip = [], False
+    for arg in argv:
+        if skip:
+            skip = False
+            continue
+        if arg in (long, short):
+            skip = True
+            continue
+        if arg.startswith(long + "="):
+            continue
+        out.append(arg)
+    return out
+
+
 def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
     """Resolve one window. Always returns a dict; `argv` is None on failure.
 

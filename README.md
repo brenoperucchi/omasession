@@ -194,6 +194,7 @@ $OMASESSION config set browserRestore true     # let the browser reopen its own 
 $OMASESSION config set browserRepair true      # put reopened browser windows back
 $OMASESSION config set browserRepairChrome true # include Chrome in automatic repair
 $OMASESSION config set appRestoreGhostty true  # include Ghostty on login restore
+$OMASESSION config set terminalPrograms "nvim,btop" # relaunch these inside their terminal
 ```
 
 The panel's **Google Chrome** action runs `restore-app google-chrome`, asking

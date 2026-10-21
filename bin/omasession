@@ -215,11 +215,15 @@ hypr_env() {
 
 # ── save ─────────────────────────────────────────────────────────────────────
 cmd_save() {
-    local name="${1:-last}" out rc repair repair_chrome
+    local name="${1:-last}" out rc repair repair_chrome terminal_programs
     repair="$(config_get browserRepair "$DEFAULT_BROWSER_REPAIR")"
+    # terminalPrograms: comma list of programs to relaunch inside their
+    # terminal (e.g. "nvim,btop"); empty by default (lib/capture.py).
+    terminal_programs="$(config_get terminalPrograms "")"
     repair_chrome="$(config_get browserRepairChrome "$DEFAULT_BROWSER_REPAIR_CHROME")"
     set +e
     out="$(OMASESSION_BROWSER_REPAIR="$repair" \
+        OMASESSION_TERMINAL_PROGRAMS="$terminal_programs" \
         OMASESSION_BROWSER_REPAIR_CHROME="$repair_chrome" OMASESSION_STATE_DIR="$STATE_DIR" \
         "$LIB/session-save.sh" "$name" 2>&1)"; rc=$?
     set -e

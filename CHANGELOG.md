@@ -23,6 +23,12 @@ request.
   week. `omasession list` shows them with named sessions (`omasession save
   <name>`); `omasession restore <name>` brings any back. Contributed by
   @dmkenney in #5.
+- A terminal can come back running the program it had open instead of a bare
+  shell. List programs with `terminalPrograms` (for example `nvim,btop`);
+  only listed ones are relaunched, since rerunning whatever was in the
+  foreground could repeat a build or a delete. When one Ghostty process
+  serves several windows, each program goes to the window whose title names
+  it, then by elimination. Works with Ghostty (`-e`), foot and kitty (`--`).
 
 ## 0.4.1 — 2026-10-21
 
