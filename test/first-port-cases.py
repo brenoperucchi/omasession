@@ -156,6 +156,7 @@ class FirstPortCases(unittest.TestCase):
         spec = [{"app_id": "chromium", "launch_cmd": "chromium", "workspace": "5"}]
         with patch.object(replay, "mapped", return_value=[]), \
              patch.object(replay, "arm_browser_profile", return_value=True), \
+             patch.object(replay, "repair_browser_session") as repair, \
              patch.object(replay, "wait_for_browser", return_value=blank), \
              patch.object(replay, "dispatch") as dispatch, \
              patch.object(replay, "move_to") as move:
@@ -168,6 +169,7 @@ class FirstPortCases(unittest.TestCase):
         self.assertEqual(placed, 1)
         self.assertFalse(any(call.args[0] == "window.close" for call in dispatch.call_args_list))
         move.assert_called_once_with("0x1", "5")
+        repair.assert_called_once_with("chromium", 1)
 
     def test_app_filter_only_replays_the_requested_class(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

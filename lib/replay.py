@@ -36,6 +36,7 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from browser_session import repair_sessions  # noqa: E402
 from resolve import skip_env_wrapper  # noqa: E402
 from safe_fs import Refused, TooLarge, open_dir_chain, read_capped_path, write_bytes  # noqa: E402
 from tiled_layout import restore_tiled  # noqa: E402
@@ -101,6 +102,12 @@ BROWSERS = {
         "policy_dir": "/etc/vivaldi/policies/managed",
     },
 }
+
+
+# Session files whose window-by-window shutdown damage has been measured and
+# undone in the lab (docs/plans/008). Same SNSS format in the others, but
+# unmeasured.
+SESSION_REPAIR_BROWSERS = frozenset({"google-chrome", "chromium"})
 
 
 def hypr(lua: str) -> str:
@@ -578,6 +585,36 @@ def arm_browser_profile(app: str) -> bool:
         return False
 
 
+def repair_browser_session(app: str, want: int) -> None:
+    """Undo the window closes a window-by-window shutdown left in the session.
+
+    Omarchy's menu reboot closes windows one at a time and Chromium drops each
+    from its session but the last, so only one window comes back. Measured and
+    proven in the lab, see docs/plans/008 and lib/browser_session.py. Runs only
+    after arm_browser_profile, which refuses while the browser is running.
+    Never fails the restore: at worst the session is left as the browser wrote it.
+    """
+    if app not in SESSION_REPAIR_BROWSERS:
+        return
+    spec = BROWSERS[app]
+    prefs = Path(spec["profile"]).expanduser()
+    # arm_browser_profile already refused a running browser; checked again here
+    # because rewriting a session file under a live browser corrupts it.
+    if profile_in_use(prefs, spec.get("comm", spec["binary"])):
+        print(f"  {app} session: left as is: the browser is running")
+        return
+    sessions = prefs.parent / "Sessions"
+    state_dir = Path(os.environ.get("XDG_STATE_HOME",
+                                    str(Path.home() / ".local/state"))) / "omasession"
+    # Anything at all goes to the log: a bug here must not cost the user the
+    # rest of the restore.
+    try:
+        note = repair_sessions(sessions, state_dir / "browser-sessions" / app, want)
+    except Exception as exc:
+        note = f"left as is: {type(exc).__name__}: {exc}"
+    print(f"  {app} session: {note}")
+
+
 def browser_command(command: str, *, restore_session: bool = True,
                     new_window: bool = False) -> str:
     """Build a browser command without duplicating mutually exclusive flags."""
@@ -634,6 +671,7 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
         if not arm_browser_profile(app):
             print(f"  ! no profile for {app}, falling back to per-window launch")
             return sum(restore(s, claimed, i, want) for i, s in enumerate(specs, 1))
+        repair_browser_session(app, want)
         known = {c["address"] for c in mapped()} | claimed
         cmd = browser_command(raw_cmd)
         dispatch("exec_cmd", f"uwsm app -- {cmd}")
