@@ -213,6 +213,21 @@ sleep 1
 check "segundo save desiste com rc=4" "4" "$rc"
 wait
 
+echo "== a window parked by a restore keeps the save from publishing"
+# A restore killed mid-placement leaves windows on its staging workspace. A
+# save then would write `last` without them.
+"$HOME/probe.sh" scenario >/dev/null 2>&1
+sleep 3
+parked="$(hyprctl clients -j | jq -r '[.[]|select(.mapped)|select(.workspace.id>0)][0].address')"
+parked_ws="$(hyprctl clients -j | jq -r --arg a "$parked" '.[]|select(.address==$a)|.workspace.id')"
+hyprctl repl "hl.dispatch(hl.dsp.window.move{window=\"address:$parked\", workspace=\"special:omasession-restore\", follow=false})" >/dev/null
+sleep 1
+before="$(fingerprint)"
+"$SAVE" >/dev/null 2>&1; rc=$?
+check "save skips the tick with rc=3" "3" "$rc"
+check "and leaves the files alone"    "$before" "$(fingerprint)"
+hyprctl repl "hl.dispatch(hl.dsp.window.move{window=\"address:$parked\", workspace=$parked_ws, follow=false})" >/dev/null
+
 ((KEEP)) || close_all
 printf '\n%d ok, %d falha(s)\n' "$pass" "$fail"
 exit $(( fail > 0 ))

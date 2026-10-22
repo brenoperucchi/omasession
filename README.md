@@ -54,8 +54,9 @@ workspaces one by one in the order they had. Hyprland does not report that
 order, and its client list keeps creation order after a swap, so a Lua config
 can supply it: define a global `window_slot_order()` that returns JSON like
 `{"3": ["0xaddr", ...]}`, filled from `ctx.targets` in your layout's
-`recalculate`. Without it, the client list order is used. Turn ordering off
-with `restoreOrder false`.
+`recalculate`. Ordering is on only when that function exists, since other
+layouts gain nothing from it; `restoreOrder true` turns it on anyway (the
+client list order is used then), and `restoreOrder false` turns it off.
 
 ## How it works
 
@@ -205,7 +206,7 @@ $OMASESSION config set browserRepair true      # put reopened browser windows ba
 $OMASESSION config set browserRepairChrome true # include Chrome in automatic repair
 $OMASESSION config set appRestoreGhostty true  # include Ghostty on login restore
 $OMASESSION config set terminalPrograms "nvim,btop" # relaunch these inside their terminal
-$OMASESSION config set restoreOrder true       # reopen windows in their saved slot order
+$OMASESSION config set restoreOrder auto       # slot order only with window_slot_order() (true/false force it)
 ```
 
 The panel's **Google Chrome** action runs `restore-app google-chrome`, asking
