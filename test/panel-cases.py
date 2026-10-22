@@ -36,6 +36,19 @@ class PanelCases(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertRegex(body, r"\btextFormat:\s*Text\.PlainText\b")
 
+    def test_a_preview_that_cannot_load_goes_back_to_the_current_save(self) -> None:
+        # Review of PR #5: thinning can delete the history snapshot the Layout
+        # tab previews; every refresh then retried the dead name and the tab
+        # stayed on "Nothing saved to draw yet" with no way back.
+        source = PANEL.read_text(encoding="utf-8")
+        match = re.search(r"id:\s*layoutProc\b(?P<body>.*?)\n  \}\n", source, re.DOTALL)
+        self.assertIsNotNone(match)
+        failure = re.search(r"if \(!root\.layoutData\)\s*\{(?P<branch>.*?)\n\s*\}",
+                            match.group("body"), re.DOTALL)
+        self.assertIsNotNone(failure, "no failure branch after loading a layout")
+        self.assertIn('root.layoutName !== "last"', failure.group("branch"))
+        self.assertIn('loadLayout("last")', failure.group("branch"))
+
     def test_app_toggles_are_blocked_when_the_cli_is_unavailable(self) -> None:
         source = PANEL.read_text(encoding="utf-8")
         for toggle_id in ("chromeToggle", "ghosttyToggle"):
