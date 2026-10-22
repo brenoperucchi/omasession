@@ -12,16 +12,17 @@ request.
   row of monitors or a portrait screen all look like themselves. **Saved**
   lists named sessions and the history with Preview and Restore, plus Save as.
   New `omasession layout [name]` gives the panel that geometry as JSON.
+  Contributed by @dmkenney in #5.
 - Browser app windows are named for their desktop entry or site ("X", not
   "Com Profile 4"), and a terminal saved with its program shows "runs btop"
-  instead of "directory not recoverable".
-
+  instead of "directory not recoverable". Contributed by @dmkenney in #5.
 - A history of earlier sessions. Each save of `last` is also kept as
   `history-<time>` when the desktop's shape changed (windows, workspaces,
   slots, commands; not titles), thinned to every change for 15 minutes, one
   per 15 minutes for 2 hours, one per hour for a day and one per day for a
   week. `omasession list` shows them with named sessions (`omasession save
-  <name>`); `omasession restore <name>` brings any back.
+  <name>`); `omasession restore <name>` brings any back. Contributed by
+  @dmkenney in #5.
 
 ## 0.4.1 — 2026-10-21
 
