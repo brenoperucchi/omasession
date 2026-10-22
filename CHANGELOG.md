@@ -4,7 +4,7 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
-## Unreleased
+## 0.5.0 — 2026-10-22
 
 - The panel has three tabs. **Windows** is the old list. **Layout** draws the
   screens to scale from the saved monitor geometry (position, size, scale,
