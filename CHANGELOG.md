@@ -31,13 +31,13 @@ request.
   close-all repair runs on each profile's session, and all of them together
   never reopen more windows than the save had. A single profile starts at
   once; with several, the rest are handed over as soon as the browser shows
-  its first window.
+  its first window. Contributed by @dmkenney in #9.
 - Browser app windows (`--app=URL`, including Omarchy's web apps) reopen on
   their own profile and URL, rebuilt from the window class
   (`brave-x.com__-Profile_4`, or `chrome-x.com__-Default` for both Chrome and
   Chromium). The browser to start comes from the window's process. Before,
   they were saved with the browser's shared command line and reopened as a
-  normal browser window.
+  normal browser window. Contributed by @dmkenney in #9.
 - A terminal can come back running the program it had open instead of a bare
   shell. List programs with `terminalPrograms` (for example `nvim,btop`);
   only listed ones are relaunched, since rerunning whatever was in the
