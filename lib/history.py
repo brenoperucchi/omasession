@@ -38,9 +38,14 @@ import os  # noqa: E402
 
 PREFIX = "history-"
 STAMP = re.compile(r"^history-(\d{8}-\d{6})\.toml$")
+TITLES = re.compile(r"^(history-\d{8}-\d{6})\.titles\.json$")
 # (age limit in seconds, bucket size in seconds); 0 keeps every snapshot.
 TIERS = ((15 * 60, 0), (2 * 3600, 15 * 60), (24 * 3600, 3600), (7 * 86400, 86400))
 RESERVED = re.compile(r"(^last$|\.prev$|^history-|^omasession\.)")
+# A snapshot stamped further ahead than this was written under a wrong clock
+# (RTC skew, NTP stepping back). It is dropped: compared against it, every
+# later save would look new and add a file.
+CLOCK_SLACK = 3600
 
 
 def load(path: Path) -> list[dict]:
@@ -117,6 +122,8 @@ def snapshot(session_dir: Path, now: float | None = None) -> str | None:
     if not windows:
         return None
     snaps = snapshots(session_dir)
+    ahead = [stem for when, stem in snaps if when > now + CLOCK_SLACK]
+    snaps = [(when, stem) for when, stem in snaps if when <= now + CLOCK_SLACK]
     made = None
     if not snaps or shape(load(session_dir / f"{snaps[0][1]}.toml")) != shape(windows):
         stem = PREFIX + time.strftime("%Y%m%d-%H%M%S", time.gmtime(now))
@@ -131,11 +138,28 @@ def snapshot(session_dir: Path, now: float | None = None) -> str | None:
             made = stem
     sizes = {stem: len(load(session_dir / f"{stem}.toml")) for _, stem in snaps}
     survivors = keep(snaps, now, sizes)
-    for _, stem in snaps:
-        if stem not in survivors:
-            for suffix in (".toml", ".titles.json"):
-                (session_dir / f"{stem}{suffix}").unlink(missing_ok=True)
+    remove(session_dir, ahead + [stem for _, stem in snaps if stem not in survivors])
     return made
+
+
+def remove(session_dir: Path, stems: list[str]) -> None:
+    """Delete these snapshots, and titles whose snapshot is gone (a crash
+    between the two copies or the two deletes), by name inside the checked
+    directory. One that will not go -- a folder, say -- is left; the rest go.
+    """
+    dir_fd = open_dir_chain(str(session_dir), create=False)
+    try:
+        names = set(os.listdir(dir_fd))
+        doomed = {f"{stem}{suffix}" for stem in stems for suffix in (".toml", ".titles.json")}
+        doomed |= {name for name in names
+                   if (m := TITLES.match(name)) and f"{m.group(1)}.toml" not in names}
+        for name in sorted(doomed & names):
+            try:
+                os.unlink(name, dir_fd=dir_fd)
+            except OSError:
+                pass
+    finally:
+        os.close(dir_fd)
 
 
 def ago(seconds: float) -> str:

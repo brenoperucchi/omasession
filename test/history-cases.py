@@ -104,5 +104,60 @@ class SnapshotCases(unittest.TestCase):
         self.assertIsNotNone(history.snapshot(self.dir, NOW))
         self.assertEqual(len(history.listing(self.dir, NOW)["history"]), 1)
 
+    def test_a_snapshot_from_a_clock_far_ahead_does_not_defeat_the_dedupe(self) -> None:
+        # One save under a wrong clock left a snapshot stamped two days ahead.
+        # Compared against it, every later save looked new and wrote a file.
+        ahead = "history-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime(NOW + 2 * 86400))
+        (self.dir / f"{ahead}.toml").write_text(toml([("foot", "9", 0, "t")]))
+        (self.dir / f"{ahead}.titles.json").write_text("[]")
+        self.write_last([("ghostty", "1", 0, "t")])
+        self.assertIsNotNone(history.snapshot(self.dir, NOW))
+        for tick in range(1, 6):
+            self.assertIsNone(history.snapshot(self.dir, NOW + 30 * tick))
+        self.assertEqual([s for _, s in history.snapshots(self.dir)], [stem(0)])
+        self.assertFalse((self.dir / f"{ahead}.titles.json").exists())
+
+    def test_a_clock_stepped_back_a_little_keeps_the_recent_snapshots(self) -> None:
+        self.write_last([("ghostty", "1", 0, "t")])
+        history.snapshot(self.dir, NOW)
+        self.assertIsNone(history.snapshot(self.dir, NOW - 120))
+        self.assertEqual([s for _, s in history.snapshots(self.dir)], [stem(0)])
+
+    def test_thinning_removes_a_snapshot_with_its_titles(self) -> None:
+        old = stem(8 * 86400)
+        (self.dir / f"{old}.toml").write_text(toml([("foot", "2", 0, "t")]))
+        (self.dir / f"{old}.titles.json").write_text("[]")
+        self.write_last([("ghostty", "1", 0, "t")])
+        history.snapshot(self.dir, NOW)
+        self.assertFalse((self.dir / f"{old}.toml").exists())
+        self.assertFalse((self.dir / f"{old}.titles.json").exists())
+        self.assertTrue((self.dir / f"{stem(0)}.titles.json").exists())
+
+    def test_titles_left_without_their_snapshot_are_removed(self) -> None:
+        orphan = stem(3600)
+        (self.dir / f"{orphan}.titles.json").write_text("[]")
+        self.write_last([("ghostty", "1", 0, "t")])
+        history.snapshot(self.dir, NOW)
+        self.assertFalse((self.dir / f"{orphan}.titles.json").exists())
+
+    def test_a_folder_named_like_a_snapshot_does_not_stop_thinning(self) -> None:
+        (self.dir / f"{stem(9 * 86400)}.toml").mkdir()
+        old = stem(8 * 86400)
+        (self.dir / f"{old}.toml").write_text(toml([("foot", "2", 0, "t")]))
+        self.write_last([("ghostty", "1", 0, "t")])
+        history.snapshot(self.dir, NOW)
+        self.assertFalse((self.dir / f"{old}.toml").exists())
+        self.assertTrue((self.dir / f"{stem(9 * 86400)}.toml").is_dir())
+
+    def test_thinning_never_removes_anything_but_history(self) -> None:
+        for name in ("last.prev.toml", "work.toml", "history-notes.toml"):
+            (self.dir / name).write_text(toml([]))
+        self.write_last([("ghostty", "1", 0, "t")])
+        history.snapshot(self.dir, NOW)
+        for name in ("last.toml", "last.titles.json", "last.prev.toml",
+                     "work.toml", "history-notes.toml"):
+            self.assertTrue((self.dir / name).exists(), name)
+
+
 if __name__ == "__main__":
     unittest.main()
