@@ -172,7 +172,7 @@ DEFAULT_BROWSER_RESTORE=true
 DEFAULT_BROWSER_REPAIR=true
 DEFAULT_BROWSER_REPAIR_CHROME=true
 DEFAULT_APP_RESTORE_GHOSTTY=true
-DEFAULT_RESTORE_ORDER=true
+DEFAULT_RESTORE_ORDER=auto
 
 config_get() { # config_get <key> <default> [raw_json]
     # $3, quando dado, poupa uma leitura de config.json que quem chama já fez
@@ -306,6 +306,7 @@ cmd_restore() {
     local restore_ghostty restore_order
     restore_ghostty="$(config_get appRestoreGhostty "$DEFAULT_APP_RESTORE_GHOSTTY")"
     # restoreOrder: put windows back in their saved slot order (replay.py).
+    # auto (the default) does it only when the Lua config reports the order.
     restore_order="$(config_get restoreOrder "$DEFAULT_RESTORE_ORDER")"
     OMASESSION_APP_RESTORE_GHOSTTY="$restore_ghostty" \
     OMASESSION_RESTORE_ORDER="$restore_order" \
@@ -380,7 +381,10 @@ cmd_restore_app() {
     if ! flock -n 9; then
         die "another save or restore is already running"
     fi
+    local restore_order
+    restore_order="$(config_get restoreOrder "$DEFAULT_RESTORE_ORDER")"
     exec env OMASESSION_APP_RESTORE_GHOSTTY=true \
+        OMASESSION_RESTORE_ORDER="$restore_order" \
         python3 "$LIB/replay.py" --app "$filter" \
         "$SESSION_DIR/last.toml"
 }

@@ -162,6 +162,15 @@ if ! clients="$(timeout --kill-after=5 15 hyprctl clients -j 2>/dev/null)" || [[
     exit 3
 fi
 
+# A restore parks windows on a hidden special workspace while it puts them in
+# slot order (lib/replay.py). A save taken then would leave them out of `last`;
+# one killed mid-way leaves them there until the next restore releases them.
+# Either way this tick is skipped, so `last` keeps those windows.
+if [[ "$(jq '[.[] | select(.workspace.name == "special:omasession-restore")] | length' <<<"$clients")" != 0 ]]; then
+    err "windows are parked for a restore -- session left untouched"
+    exit 3
+fi
+
 # A browser restart is the one live-session transition that cannot wait for a
 # reboot restore: Chromium reopens its windows on the current workspace. The
 # repair runs under this same lock, before capture, and only moves windows that

@@ -54,7 +54,8 @@ SETTLE = 0.4
 # right arrival order. So while restoring, every window is parked on a hidden
 # special workspace instead of placed, and once all are open they move to their
 # real workspaces one by one in saved slot order (the `order` field written by
-# capture.py). Off with restoreOrder=false.
+# capture.py). On when the Lua config defines window_slot_order(), or with
+# restoreOrder=true; off with restoreOrder=false.
 STAGING_WORKSPACE = "special:omasession-restore"
 _staged: list[tuple[str, dict, bool]] | None = None
 
@@ -278,15 +279,21 @@ def place_staged() -> None:
 
     The sort is stable, so windows without an `order` (an older session file)
     keep the order they were restored in.
+
+    SIGTERM, SIGHUP and SIGINT are caught, not blocked, while this runs: a
+    blocked mask would be inherited by every hyprctl child, and a stop request
+    would wait for the whole ordered pass. A signal here ends the ordered pass
+    early instead; release_parked() in the finally still puts every window on
+    its workspace, and the signal is acted on after that.
     """
-    global _staged
-    # A SIGTERM here would stop placement half-way; hold it until every
-    # window is out, then it is delivered as usual.
-    stop = {signal.SIGTERM, signal.SIGHUP}
-    signal.pthread_sigmask(signal.SIG_BLOCK, stop)
+    global _staged, _deferred_signal
     staged, _staged = _staged or [], None
+    stop = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    previous = {sig: signal.signal(sig, defer_signal) for sig in stop}
     try:
         for addr, spec, browser in sorted(staged, key=lambda item: slot_order(item[1])):
+            if _deferred_signal is not None:
+                break
             # One failed move must not leave the rest parked.
             try:
                 if browser:
@@ -295,9 +302,55 @@ def place_staged() -> None:
                     place(addr, spec)
             except Exception as exc:
                 print(f"  ! could not place {addr}: {exc}")
-        release_parked({addr: spec.get("workspace") for addr, spec, _ in staged})
     finally:
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, stop)
+        try:
+            release_parked({addr: spec.get("workspace") for addr, spec, _ in staged})
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+            signum, _deferred_signal = _deferred_signal, None
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            if signum is not None:
+                raise SystemExit(128 + signum)
+
+
+_deferred_signal: int | None = None
+
+
+def defer_signal(signum, _frame) -> None:
+    """Note a stop request during placement; place_staged() acts on it."""
+    global _deferred_signal
+    if _deferred_signal is None:
+        _deferred_signal = signum
+
+
+def layout_reports_order() -> bool:
+    """Whether the Lua config defines window_slot_order().
+
+    Only a layout that slots windows by arrival order gains from ordered
+    restore, and such a config is the one that defines the hook. Dwindle and
+    master users would only see their windows hidden while restore runs.
+    """
+    try:
+        out = subprocess.run(
+            ["hyprctl", "repl",
+             'return type(window_slot_order) == "function" and "yes" or "no"'],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return out.stdout.strip() == "yes"
+
+
+def restore_order_enabled(setting: str) -> bool:
+    """restoreOrder: true forces ordered restore, false turns it off, and auto
+    (the default) uses it only when the config reports a slot order."""
+    if setting == "true":
+        return True
+    if setting == "false":
+        return False
+    return layout_reports_order()
 
 
 def release_parked(targets: dict[str, object] | None = None) -> int:
@@ -1070,7 +1123,7 @@ def main() -> int:
     started = time.monotonic()
     ok = 0
     global _staged
-    if os.environ.get("OMASESSION_RESTORE_ORDER", "true") != "false":
+    if restore_order_enabled(os.environ.get("OMASESSION_RESTORE_ORDER", "auto")):
         _staged = []
     try:
         for app, specs in browser_specs.items():

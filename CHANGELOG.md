@@ -38,8 +38,10 @@ request.
   slots, and a swapped window came back unswapped. Each window's position in
   its workspace is now saved; during restore, windows wait on a hidden
   workspace and then move in that order. A Lua config can report the real
-  slot order through a global `window_slot_order()` (see the README). Off
-  with `restoreOrder false`.
+  slot order through a global `window_slot_order()` (see the README).
+  Ordering runs only when that function exists, so Dwindle and Master users
+  see no change; `restoreOrder true` or `false` overrides that. A save taken
+  while windows are parked is skipped, so `last` never loses them.
 
 ## 0.4.1 — 2026-10-21
 
