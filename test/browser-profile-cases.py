@@ -35,6 +35,28 @@ class AppWindowCases(unittest.TestCase):
         self.assertIsNone(resolve.app_window_argv("brave-browser", {}))
         self.assertIsNone(resolve.app_window_argv("com.mitchellh.ghostty", {}))
 
+    def test_chrome_and_chromium_app_windows_are_recognised(self) -> None:
+        # Both browsers name app windows "chrome-<host>_<path>-<profile>".
+        klass = "chrome-x.com__-Profile_2"
+        self.assertEqual(resolve.app_window_argv(klass, {}),
+                         ["chromium", "--profile-directory=Profile 2", "--app=https://x.com/"])
+        self.assertEqual(resolve.app_window_label(klass, {}), "x.com")
+
+    def test_the_window_process_names_the_browser(self) -> None:
+        for comm, binary in (("chrome", "google-chrome-stable"), ("chromium", "chromium"),
+                             ("brave", "brave")):
+            with patch.object(resolve.Path, "read_text", return_value=f"{comm}\n"):
+                argv = resolve.app_window_argv("chrome-x.com__-Default", {}, pid=1234)
+            self.assertEqual(argv[0], binary, comm)
+
+    def test_an_unknown_process_falls_back_to_the_class(self) -> None:
+        with patch.object(resolve.Path, "read_text", side_effect=OSError):
+            self.assertEqual(resolve.app_window_argv("brave-x.com__-Default", {}, pid=1234)[0],
+                             "brave")
+        with patch.object(resolve.Path, "read_text", return_value="python3\n"):
+            self.assertEqual(resolve.app_window_argv("brave-x.com__-Default", {}, pid=1234)[0],
+                             "brave")
+
     def test_resolve_uses_the_app_rebuild_before_the_shared_command_line(self) -> None:
         result = resolve.resolve({"class": "brave-x.com__-Profile_4", "pid": 1}, {})
         self.assertEqual(result["via"], "app window")
