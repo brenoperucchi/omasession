@@ -472,18 +472,29 @@ def child_command_start(argv: list[str]) -> int | None:
 # Chromium-family app windows (`--app=URL`, Omarchy's web apps) get a Wayland
 # class of "<browser>-<host>_<path>-<profile>", with every "/" in the path and
 # the space in "Profile 4" turned into "_": `brave --profile-directory="Profile
-# 4" --app=https://x.com/` shows up as "brave-x.com__-Profile_4". The class is
-# all there is to relaunch it from -- the window shares its process and command
-# line with every other window of the browser.
+# 4" --app=https://x.com/` shows up as "brave-x.com__-Profile_4". Chromium and
+# Chrome both use "chrome-", so the prefix alone does not say which browser it
+# was. The class is all there is to relaunch it from -- the window shares its
+# process and command line with every other window of the browser.
 APP_WINDOW = re.compile(
-    r"^(?P<browser>brave|chromium|google-chrome|vivaldi|microsoft-edge)-"
+    r"^(?P<browser>brave|chrome|chromium|google-chrome|vivaldi|microsoft-edge)-"
     r"(?P<name>[^_]+_.*)-(?P<profile>Default|Profile_\d+|Guest_Profile)$")
 APP_BROWSER_BINARY = {
     "brave": "brave",
+    # Without a process to ask, Omarchy's default browser.
+    "chrome": "chromium",
     "chromium": "chromium",
     "google-chrome": "google-chrome-stable",
     "vivaldi": "vivaldi-stable",
     "microsoft-edge": "microsoft-edge-stable",
+}
+# The browser's process name (/proc/<pid>/comm) to the command that starts it.
+APP_BROWSER_COMM = {
+    "brave": "brave",
+    "chromium": "chromium",
+    "chrome": "google-chrome-stable",
+    "vivaldi-bin": "vivaldi-stable",
+    "msedge": "microsoft-edge-stable",
 }
 WEBAPP_URL = re.compile(r"(?:--app=|omarchy-launch-webapp\s+)[\"']?(https?://[^\s\"']+)")
 
@@ -522,13 +533,30 @@ def webapp_urls(index: dict[str, dict] | None) -> list[str]:
     return urls
 
 
-def app_window_argv(klass: str, index: dict[str, dict] | None = None) -> list[str] | None:
-    """How to reopen a Chromium-family app window, from its class alone.
+def app_browser_binary(browser: str, pid: int = 0) -> str:
+    """The command that starts the browser an app window belongs to.
+
+    The window's own process says which browser it is; the class prefix is the
+    fallback, and it cannot tell Chromium from Chrome.
+    """
+    if pid:
+        try:
+            comm = Path(f"/proc/{pid}/comm").read_text().strip()
+        except OSError:
+            comm = ""
+        if comm in APP_BROWSER_COMM:
+            return APP_BROWSER_COMM[comm]
+    return APP_BROWSER_BINARY[browser]
+
+
+def app_window_argv(klass: str, index: dict[str, dict] | None = None,
+                    pid: int = 0) -> list[str] | None:
+    """How to reopen a Chromium-family app window, from its class and process.
 
     The URL comes from a desktop entry whose --app URL encodes to the same
     class when there is one -- exact, query string and all -- and is otherwise
     read back out of the class, which loses nothing for the usual "host/" or
-    "host/path" app.
+    "host/path" app. The browser comes from the window's process (`pid`).
     """
     match = APP_WINDOW.match(klass)
     if not match:
@@ -539,7 +567,7 @@ def app_window_argv(klass: str, index: dict[str, dict] | None = None) -> list[st
         host, _, path = name.partition("_")
         url = f"https://{host}{path.replace('_', '/') or '/'}"
     profile = match.group("profile").replace("_", " ")
-    return [APP_BROWSER_BINARY[match.group("browser")],
+    return [app_browser_binary(match.group("browser"), pid),
             f"--profile-directory={profile}", f"--app={url}"]
 
 
@@ -724,7 +752,7 @@ def resolve(window: dict, index: dict[str, dict] | None = None) -> dict:
               "via": "unresolved", "single_instance": klass in SINGLE_INSTANCE,
               "note": ""}
 
-    app_argv = app_window_argv(klass, index)
+    app_argv = app_window_argv(klass, index, pid)
     if app_argv:
         result["argv"] = app_argv
         result["via"] = "app window"
