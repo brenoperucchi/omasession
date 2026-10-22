@@ -27,7 +27,11 @@ request.
   save records the browser's open profiles (Local State
   `last_active_profiles`); restore marks each as cleanly closed and launches
   each with `--profile-directory`. Before, only Default reopened and the other
-  profiles' windows were lost or came back empty.
+  profiles' windows were lost or came back empty. The Chrome and Chromium
+  close-all repair runs on each profile's session, and all of them together
+  never reopen more windows than the save had. A single profile starts at
+  once; with several, the rest are handed over as soon as the browser shows
+  its first window.
 - Browser app windows (`--app=URL`, including Omarchy's web apps) reopen on
   their own profile and URL, rebuilt from the window class
   (`brave-x.com__-Profile_4`). Before, they were saved with the browser's

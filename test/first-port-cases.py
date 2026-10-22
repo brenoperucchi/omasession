@@ -154,7 +154,9 @@ class FirstPortCases(unittest.TestCase):
     def test_cold_browser_does_not_close_an_unmatched_blank_window(self) -> None:
         blank = [{"address": "0x1", "class": "chromium", "title": "New Tab"}]
         spec = [{"app_id": "chromium", "launch_cmd": "chromium", "workspace": "5"}]
-        with patch.object(replay, "mapped", return_value=[]), \
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(replay, "profile_root", return_value=Path(tmp)), \
+             patch.object(replay, "mapped", return_value=[]), \
              patch.object(replay, "arm_browser_profile", return_value=True), \
              patch.object(replay, "repair_browser_session") as repair, \
              patch.object(replay, "wait_for_browser", return_value=blank), \
@@ -169,7 +171,7 @@ class FirstPortCases(unittest.TestCase):
         self.assertEqual(placed, 1)
         self.assertFalse(any(call.args[0] == "window.close" for call in dispatch.call_args_list))
         move.assert_called_once_with("0x1", "5")
-        repair.assert_called_once_with("chromium", 1)
+        repair.assert_called_once_with("chromium", 1, ["Default"])
 
     def test_app_filter_only_replays_the_requested_class(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

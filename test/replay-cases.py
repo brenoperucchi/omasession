@@ -72,6 +72,45 @@ class RepairBrowserSession(unittest.TestCase):
         repair.assert_called_once_with(self.sessions, self.backups, 4)
         self.assertIn("google-chrome session: ok", out)
 
+    def test_every_profile_is_repaired_within_the_saved_window_count(self) -> None:
+        # Profile 1 already has 1 window open in its session; the save had 4 in
+        # all, so Default may only grow to 3, and Profile 1 to what Default left.
+        counts = {"Default": 1, "Profile 1": 1}
+        root = self.sessions.parent.parent
+
+        def count(sessions):
+            return counts[sessions.parent.name]
+
+        def repair(sessions, _backups, room):
+            counts[sessions.parent.name] = min(room, 3)
+            return "ok"
+
+        out = io.StringIO()
+        with patch.object(replay, "profile_in_use", return_value=False), \
+             patch.object(replay, "session_window_count", side_effect=count), \
+             patch.object(replay, "repair_sessions", side_effect=repair) as repair_mock, \
+             contextlib.redirect_stdout(out):
+            replay.repair_browser_session("google-chrome", 4, ["Default", "Profile 1"])
+
+        self.assertEqual([c.args for c in repair_mock.call_args_list], [
+            (root / "Default" / "Sessions", self.backups, 3),
+            (root / "Profile 1" / "Sessions", self.backups / "Profile 1", 1),
+        ])
+        self.assertIn("google-chrome Default session: ok", out.getvalue())
+        self.assertIn("google-chrome Profile 1 session: ok", out.getvalue())
+
+    def test_a_running_profile_does_not_stop_the_others(self) -> None:
+        out = io.StringIO()
+        with patch.object(replay, "profile_in_use",
+                          side_effect=lambda prefs, _comm: prefs.parent.name == "Default"), \
+             patch.object(replay, "repair_sessions", return_value="ok") as repair, \
+             contextlib.redirect_stdout(out):
+            replay.repair_browser_session("google-chrome", 4, ["Default", "Profile 1"])
+
+        self.assertEqual(repair.call_count, 1)
+        self.assertEqual(repair.call_args.args[0].parent.name, "Profile 1")
+        self.assertIn("Default session: left as is: the browser is running", out.getvalue())
+
     def test_unmeasured_browsers_are_not_touched(self) -> None:
         repair, out = self.run_repair("brave")
 

@@ -86,5 +86,39 @@ class ProfileCases(unittest.TestCase):
                     self.assertFalse(replay.arm_browser_profile("brave-browser", name), name)
             self.assertEqual(outside.read_text(), "{}")
 
+class ColdLaunchCases(unittest.TestCase):
+    """How restore_browser launches a stopped browser, one profile or several."""
+
+    def launch(self, profiles: str):
+        spec = [{"app_id": "chromium", "launch_cmd": "chromium", "workspace": "1",
+                 "browser_profiles": profiles}]
+        with patch.object(replay, "mapped", return_value=[]), \
+                patch.object(replay, "arm_browser_profile", return_value=True), \
+                patch.object(replay, "repair_browser_session") as repair, \
+                patch.object(replay, "find_new", return_value=None) as find_new, \
+                patch.object(replay, "wait_for_browser", return_value=[]), \
+                patch.object(replay, "dispatch") as dispatch, \
+                patch.object(replay.time, "sleep") as sleep, \
+                patch("sys.stdout"):
+            replay.restore_browser("chromium", spec, [], set())
+        launches = [c.args[1] for c in dispatch.call_args_list if c.args[0] == "exec_cmd"]
+        return repair, find_new, sleep, launches
+
+    def test_one_profile_launches_without_waiting(self) -> None:
+        repair, find_new, sleep, launches = self.launch("Default")
+        self.assertEqual(len(launches), 1)
+        find_new.assert_not_called()
+        sleep.assert_not_called()
+        repair.assert_called_once_with("chromium", 1, ["Default"])
+
+    def test_more_profiles_wait_once_for_the_browser_then_hand_over(self) -> None:
+        repair, find_new, sleep, launches = self.launch("Default,Profile 1,Profile 2")
+        self.assertEqual(len(launches), 3)
+        self.assertIn("--profile-directory=Profile 2", launches[2])
+        self.assertEqual(find_new.call_count, 1)
+        sleep.assert_not_called()
+        repair.assert_called_once_with("chromium", 1, ["Default", "Profile 1", "Profile 2"])
+
+
 if __name__ == "__main__":
     unittest.main()
