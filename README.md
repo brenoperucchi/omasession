@@ -4,31 +4,31 @@
 
 **We Can Bring Every Window Back.**
 
-Reopens what you had open, where you had it, after a reboot or a crash — the
-thing macOS does with *"Reopen windows when logging back in"*, on Omarchy 4.
+OmaSession reopens what you had open, where you had it, after a reboot, a
+logout or a crash. It is what macOS does with *"Reopen windows when logging
+back in"*, built for Omarchy 4.
 
-![OmaSession panel](screenshots/panel-healthy.png)
+![OmaSession panel](screenshots/panel-windows.png)
 
 > **Status: usable end to end.** Save, restore, the guard, the resolver and
-> the panel all read and write through the real CLI — no mock, no fabricated
-> data. See [Where it actually is](#where-it-actually-is) for what is
-> verified where.
+> the panel all read and write through the real CLI, with no mock data. See
+> [Where it actually is](#where-it-actually-is) for what is verified where.
 
 | | |
 |---|---|
-| **Any application** | Resolves the command from the system itself — `.desktop` index, systemd scope, `/proc` — not a fixed list of known terminals and browsers. |
-| **Grouped by monitor** | Windows are grouped under the monitor they were on, each with its own workspaces underneath — not one flat list. |
-| **tmux-aware** | A terminal attached to tmux comes back attached to the *same session*, not a bare shell in `$HOME`. |
-| **Honest about gaps** | A window with no known launch command is flagged before the reboot, in the panel — never discovered after. |
-| **Browser tabs, for real** | Arms the browser's own crash-recovery instead of scripting individual tabs — survives power loss and GPU lockups a pre-shutdown hook never could. |
-| **Browser restarts keep their desks** | When Chrome or Chromium reopens its windows during the same login, the next snapshot moves only those existing windows back to their saved workspaces. |
-| **Never a worse save** | Every snapshot is staged, validated against the screen it came from, and only then published — a save that can't prove itself never overwrites one that could. |
+| **Any application** | The command to relaunch comes from the system itself (the `.desktop` index, the systemd scope, `/proc`), so it works beyond a fixed list of known apps. |
+| **Terminals come back in place** | Same working directory, the same tmux session, and optionally the program that was running in them, such as `nvim` or `btop`. |
+| **Browsers bring their own tabs** | The browser's crash recovery reopens its windows and tabs, for every profile that was open. Web apps reopen as web apps. |
+| **Layouts** | Windows return to their workspace, monitor, size and floating state. Dwindle splits are rebuilt, and layouts that place windows by order get them back in their slots. |
+| **History and named sessions** | Every change to the desktop is kept for a week, thinned over time. Save any arrangement under a name and restore it later. |
+| **See it before you need it** | The panel lists what will come back, draws each saved workspace to scale and flags any window it can't relaunch, before the reboot. |
+| **Never a worse save** | Every snapshot is checked against the screen it came from before it replaces the last one. A save that looks wrong is refused. |
 
 ## Why a new plugin
 
-Tools that predate Omarchy 4 drive the compositor with the pre-Lua `hyprctl
-dispatch exec` / `keyword windowrule` syntax. On a Lua-configured Hyprland
-0.56 — the Omarchy 4 default — that syntax is rejected *silently*: the tool
+Tools written before Omarchy 4 drive the compositor with the pre-Lua `hyprctl
+dispatch exec` and `keyword windowrule` syntax. Hyprland 0.56 with a Lua
+config, the Omarchy 4 default, rejects that syntax *silently*, so the tool
 reports success against an empty desktop.
 
 | | hyprresume 0.5.0 | OmaSession |
@@ -37,82 +37,146 @@ reports success against an empty desktop.
 | single-instance Chromium windows | does not launch | **4/4 in 3s** |
 | after a real reboot | 0 restored | **4/4 in 5s**, plus the browser's own tabs |
 
-Geometry, floating state and a terminal's working directory come back
-identical.
+## What comes back
 
-**Dwindle tiled layouts.** On complete workspaces, restore reconstructs the
-saved split directions and proportions, then verifies the resulting tiles.
-Workspaces with missing or extra tiles, unsupported settings, or incompatible
-geometry are skipped with a diagnostic. This also applies to app-only restores:
-they cannot rebuild just one app's portion of a mixed-app layout. See
-[`docs/tiled-layout.md`](docs/tiled-layout.md) for requirements and testing.
+### Any window
+
+`lib/resolve.py` works out the command that brings a window back from the
+system: the `.desktop` index, the systemd scope for Flatpaks, and
+`/proc/<pid>/cmdline` as a last resort. It resolved 19 of 19 windows on a
+real desktop. A window it can't resolve is shown in the panel before the
+reboot, so you find out then and not after. Details in
+[`docs/plans/003`](docs/plans/003-command-resolver.md).
+
+### Terminals
+
+Ghostty, foot, kitty and Alacritty reopen in the directory they were in. A
+terminal attached to tmux reattaches to that same session instead of
+opening a bare shell ([`docs/plans/005`](docs/plans/005-tmux-session-recovery.md)).
+
+A terminal can also come back running the program it had in the foreground.
+Only the programs you list are relaunched, since rerunning whatever was in
+front could repeat a build or a delete:
+
+```
+$OMASESSION config set terminalPrograms "nvim,btop"
+```
+
+The program runs inside your shell (bash, zsh or fish), so it gets the PATH
+your shell config sets, and quitting it leaves you at a prompt. Ghostty uses
+`-e`, foot and kitty use `--`. When one Ghostty process serves several
+windows, each program goes to the window whose title names it.
+
+### Browsers
+
+Chromium, Google Chrome, Brave and Vivaldi reopen their own windows and tabs
+through their crash recovery. The session file survives the reboot intact.
+What stops the browser from restoring it is one line in its profile,
+`exit_type = "Crashed"`, written when the session teardown kills it.
+OmaSession sets it back to `"Normal"` before launching the browser, so no
+pre-shutdown hook is needed: 3 of 3 tabs came back with it, 0 of 3 without,
+on Chromium and Chrome ([`docs/plans/001`](docs/plans/001-RESULTADO.md)).
+
+- **Every profile.** The save records which profiles were open, and restore
+  launches each one with `--profile-directory`.
+- **Web apps.** A window opened with `--app=URL`, Omarchy's web apps
+  included, reopens as the same app on the same profile. The URL comes from
+  the window class or its desktop entry, and the browser from the window's
+  process.
+- **Reboot from the Omarchy menu.** The menu closes windows one at a time,
+  and Chrome or Chromium would keep only the last one. Before launching the
+  browser, OmaSession undoes those closes in each profile's session file,
+  keeps the original aside and logs the decision in `last-restore.log`
+  ([`docs/plans/008`](docs/plans/008-chrome-session-close-all.md)).
+- **Browser restarts during a login.** When Chrome or Chromium restarts and
+  reopens its windows on the current workspace, the next snapshot moves
+  those same windows back to their saved workspaces. It matches them by
+  title, never opens or closes a window, and keeps the previous snapshot
+  until the windows are back in place. Turn it off with `browserRepair
+  false`, or only for Chrome with `browserRepairChrome false`.
+
+Chrome needs one extra step to restore reliably. See [Install](#install).
+
+### Layout
+
+Geometry, floating state and the monitor come back as they were. Workspace 3
+is a different desk on each screen, so windows are grouped and restored by
+the monitor they were on.
+
+**Dwindle tiled layouts.** On a workspace where every window came back,
+restore rebuilds the saved split directions and proportions and then checks
+the resulting tiles. A workspace with missing or extra tiles, unsupported
+settings or geometry that doesn't fit is skipped with a diagnostic. An
+app-only restore can't rebuild just one app's part of a mixed layout. See
+[`docs/tiled-layout.md`](docs/tiled-layout.md).
 
 **Layouts that place windows by order.** Lua layouts (`hl.layout.register`)
-and similar layouts put each window in a slot by the order it arrived. Restore
-opens every window on a hidden workspace first, then moves them to their
-workspaces one by one in the order they had. Hyprland does not report that
-order, and its client list keeps creation order after a swap, so a Lua config
-can supply it: define a global `window_slot_order()` that returns JSON like
-`{"3": ["0xaddr", ...]}`, filled from `ctx.targets` in your layout's
-`recalculate`. Ordering is on only when that function exists, since other
-layouts gain nothing from it; `restoreOrder true` turns it on anyway (the
-client list order is used then), and `restoreOrder false` turns it off.
+and similar ones put each window in a slot by the order it arrived. For
+these, restore opens every window on a hidden workspace first, then moves
+them to their workspaces one by one in the order they had. Hyprland doesn't
+report that order, and its client list keeps creation order after a swap,
+so your Lua config can supply it: define a global `window_slot_order()` that
+returns JSON like `{"3": ["0xaddr", ...]}`, filled from `ctx.targets` in your
+layout's `recalculate`. Ordering only runs when that function exists, so
+Dwindle and Master users see no change. `restoreOrder true` turns it on
+anyway, using the client list order, and `restoreOrder false` turns it off.
+If a restore is killed while windows are hidden, the timer skips its saves
+until the next restore puts them back.
 
-## How it works
+## The panel
 
-**Resolving what to relaunch.** `lib/resolve.py` answers "what command
-brings this back?" from the system — the `.desktop` index, the systemd
-scope for Flatpaks, `/proc/cmdline` as a last resort — instead of a fixed
-app list. 19/19 resolved against a real desktop; a window it can't resolve
-is flagged before the reboot, not discovered after. A terminal attached to
-tmux reattaches to that exact session instead of coming back as a bare
-shell. See [`docs/plans/003`](docs/plans/003-command-resolver.md) and
-[`docs/plans/005`](docs/plans/005-tmux-session-recovery.md).
+The bar widget shows what was last captured and whether all of it can come
+back, with **Save now** and **Restore session**. Below that:
 
-**Browser tabs.** Nothing is lost at shutdown — the session file survives
-the reboot byte-for-byte. What blocks the restore is one line in the
-browser's own profile, `exit_type = "Crashed"`, written when the session
-teardown kills it. Arming that flag back to `"Normal"` needs no
-pre-shutdown hook: **3/3 tabs restored** with it armed, 0/3 without, across
-Chromium and Chrome. Full result and the six ruled-out hypotheses:
-[`docs/plans/001`](docs/plans/001-RESULTADO.md).
+- **Restore App Windows** has a card for Google Chrome and one for Ghostty.
+  The Chrome button asks Chrome to restore its own windows and tabs and then
+  places them. The Ghostty button reopens only the Ghostty windows. Each
+  card's toggle stays visible when the app is closed: Chrome's controls
+  `browserRepairChrome`, and Ghostty's controls `appRestoreGhostty`.
+- **Windows** lists every saved window under its monitor and workspace, with
+  its directory or program, and flags the ones that can't come back.
+- **Layout** draws each workspace to scale from the saved monitor geometry
+  (position, size, scale, rotation), so an ultrawide, a row of monitors or a
+  portrait screen look like themselves.
+- **Saved** lists your named sessions and the history, each with Preview
+  (shown in the Layout tab) and Restore, plus **Save as** to name the current
+  arrangement.
 
-**Multi-monitor.** "Workspace 3" means a different desk depending on which
-screen it is on, so the panel groups windows under the monitor they were on
-first. The panel keeps the app and restart sections in one clipped body scroll,
-so messages and long window inventories remain reachable on short screens while
-the compact header and save cadence stay visible.
+| Layout | Saved |
+|---|---|
+| ![Layout tab](screenshots/panel-layout.png) | ![Saved tab](screenshots/panel-saved.png) |
 
-![Three monitors, six windows, all grouped correctly](screenshots/panel-multimonitor.png)
+![Three monitors, six windows, grouped by monitor](screenshots/panel-multimonitor.png)
 
-**Browser restart placement.** The snapshot timer also keeps a small
-browser-generation record using each browser process's PID and Linux start
-time. If that generation changes, `lib/browser_repair.py` waits for the
-browser's existing titled windows, matches them one-to-one against the saved
-title sidecar, and moves them to their saved workspaces. It never launches or
-closes a window. The workspace's existing Hyprland monitor assignment carries
-the same monitor placement used by the reboot restore; it leaves the previous
-snapshot intact while a restore is still incomplete. Disable this live repair
-with:
+## History and named sessions
+
+`last` is what login restores. Each time the desktop's shape changes (windows,
+workspaces, slots or commands, not titles), a copy is also kept as
+`history-<time>`: every change for 15 minutes, then one per 15 minutes for 2
+hours, one per hour for a day and one per day for a week. You can also save
+any arrangement under a name and bring it back later:
 
 ```
-$OMASESSION config set browserRepair false
+$OMASESSION save work          # save the current windows as "work"
+$OMASESSION list               # named sessions and history, with ages
+$OMASESSION restore work       # or restore history-20261021-222219
 ```
 
-The panel's Chrome toggle controls `browserRepairChrome`, which can disable
-only Chrome's automatic repair while leaving the other supported browsers on.
+## Never a worse save
 
-**Never a worse save.** A session saver's worst failure isn't missing a
-save — it's overwriting a good one with a bad one. `lib/session-save.sh`
-stages every save into its own generation, validates it against the screen
-it was taken from, and only then publishes it. 25/25 in
-`test/guard-cases.sh`, including killing the save mid-write at random.
+The worst thing a session saver can do is overwrite a good save with a bad
+one, for example a snapshot of an empty desktop.
+`lib/session-save.sh` writes each save to a staging copy, checks it against
+the screen it was taken from, and only then publishes it. A save that can't
+prove itself is refused and the previous one stays. `test/guard-cases.sh`
+covers these refusals, including killing the save at random points while it
+writes.
 
 ## Install
 
-The CLI lives inside the plugin's own directory — `omarchy plugin add`
-clones it there but does not put it on `PATH`, so every command below
-spells out where it is:
+The CLI lives inside the plugin's own directory. `omarchy plugin add` clones
+it there but doesn't put it on `PATH`, so every command below spells out the
+full path:
 
 ```
 omarchy plugin add https://github.com/brenoperucchi/omasession --enable
@@ -121,108 +185,72 @@ omarchy plugin add https://github.com/brenoperucchi/omasession --enable
 
 `install` writes and enables the user-level snapshot timer (`systemctl
 --user`, no root) and adds one marked login-restore line to
-`~/.config/hypr/autostart.lua`. Nothing captures or restores anything
-before this step runs. Depends on `python3`, `jq`, and `hyprctl` — all
-present on a stock Omarchy install; `tmux` only if a terminal window is
-already a tmux client.
+`~/.config/hypr/autostart.lua`. Nothing is captured or restored before this
+step runs. It needs `python3`, `jq` and `hyprctl`, all present on a stock
+Omarchy install, and `tmux` only if a terminal is already a tmux client.
 
-**Chrome only, one-time, needs root** — a literal command, not a script:
+**Chrome only, one time, needs root.** This is a literal command, not a
+script:
 
 ```
 printf '%s\n' '{"RestoreOnStartup": 1, "PromotionalTabsEnabled": false, "DefaultBrowserSettingEnabled": false}' \
   | sudo install -D -T -m 644 /dev/stdin /etc/opt/chrome/policies/managed/omasession-no-promo.json
 ```
 
-Swap the destination for the browser you have — `/etc/chromium/policies/managed/…`,
-`/etc/brave/policies/managed/…`, `/etc/vivaldi/policies/managed/…`, or
-`/etc/opt/edge/policies/managed/…` — same filename, same content;
-`omasession install`/`uninstall` check all five. `install -D -T -m 644`
-creates the directory if it's missing and replaces the destination outright
-at that exact name, the same way this project's own writes do — `-T` is
-what keeps it from treating an existing directory (or a symlink to one) at
-that name as a place to copy *into*, under a name of its own choosing,
-instead of replacing it; without it, a symlink there defeats the write
-silently rather than being refused. One narrower gap remains, and needs
-root already to matter: a symlink swapped into an ancestor directory under
-`/etc` (not the final name) is still followed — every component from
-`/etc` down is normally root-owned 0755, so reaching that requires either
-already having root or an already-broken package.
+On the first launch after every version update, Chrome shows onboarding pages
+instead of restoring the session, and drops the restore. Only a browser policy
+file fixes that, since Chrome ignores the same setting written by hand. You
+opt in and run it yourself, once. `omasession install` never writes it, and
+nothing in this plugin runs as root. Chromium doesn't need it.
 
-Chrome replaces session restore with onboarding pages on the first launch
-after every version bump, silently dropping that restore — fixing it needs
-a browser policy file, since Chrome ignores the same setting written by
-hand. Opt-in, run by you, once; `omasession install` never writes it for
-you, and nothing in this plugin ever runs as root. Chromium doesn't need
-this.
+For another Chromium-based browser, use its policy directory with the same
+file name and content: `/etc/chromium/policies/managed/`,
+`/etc/brave/policies/managed/`, `/etc/vivaldi/policies/managed/` or
+`/etc/opt/edge/policies/managed/`. `omasession install` and `uninstall`
+check all five. `install -D -T -m 644` creates the directory if needed and
+replaces the file at that exact name. The `-T` keeps it from copying *into*
+a directory, or a symlink to one, that sits at that name; without it, a
+symlink there would silently redirect the write. A symlink swapped into a
+parent directory under `/etc` is still followed, but every directory from
+`/etc` down is normally root-owned 0755, so that already takes root or a
+broken package.
 
 ## Usage
 
-The panel (bar widget) shows what was last captured and whether it can come
-back, with **Save now** and **Restore session**. The **Restore App Windows**
-section has independent Google Chrome and Ghostty cards. Each card keeps its
-toggle visible when the app is closed; the CLI reports whether the executable
-is installed and whether the current snapshot contains that app. Chrome's
-toggle controls browserRepairChrome, while Ghostty's controls
-appRestoreGhostty. The global browserRepair setting still acts as the
-master switch for automatic repair of every supported browser. If the plugin
-CLI is unavailable, the app controls remain visible but disabled until it is
-installed.
-Same from the CLI:
-
 ```
 OMASESSION=~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession
-$OMASESSION save              # capture now, outside the timer's own cadence
-$OMASESSION restore           # replay the last capture into the compositor
-$OMASESSION restore-browser google-chrome  # repair already-open Chrome windows
-$OMASESSION restore-app google-chrome      # restore Chrome windows and tabs
-$OMASESSION restore-app ghostty            # restore only Ghostty windows
-$OMASESSION status --json     # what the panel itself reads
-$OMASESSION resolve           # which command each current window would resolve to
-```
-
-## Earlier sessions and named layouts
-
-`last` is what login restores. Each time the desktop's shape changes, a copy
-is also kept as `history-<time>`: every change for 15 minutes, then one per
-15 minutes for 2 hours, one per hour for a day and one per day for a week.
-Save any arrangement under a name of your own and bring it back later:
-
-```
-$OMASESSION save work          # save the current windows as "work"
-$OMASESSION list               # named sessions and history, with ages
-$OMASESSION restore work       # or restore history-20261021-222219
+$OMASESSION save [name]       # capture now, outside the timer's cadence
+$OMASESSION restore [name]    # replay the last capture, or a named one
+$OMASESSION list              # named sessions and history
+$OMASESSION restore-app google-chrome      # restore Chrome's windows and tabs
+$OMASESSION restore-app ghostty            # restore only the Ghostty windows
+$OMASESSION restore-browser google-chrome  # move open Chrome windows back to their workspaces
+$OMASESSION status --json     # what the panel reads
+$OMASESSION layout [name]     # a saved session as geometry, for the Layout tab
+$OMASESSION resolve           # the command each open window would resolve to
 ```
 
 ## Configure
 
-Through the panel's settings, or directly with the same CLI:
+From the panel's settings, or with the same CLI:
 
 ```
-OMASESSION=~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession
 $OMASESSION config set saveIntervalSec 30      # how often the timer snapshots
-$OMASESSION config set restoreOnLogin true     # replay automatically at login
+$OMASESSION config set restoreOnLogin true     # restore automatically at login
 $OMASESSION config set browserRestore true     # let the browser reopen its own tabs
-$OMASESSION config set browserRepair true      # put reopened browser windows back
-$OMASESSION config set browserRepairChrome true # include Chrome in automatic repair
-$OMASESSION config set appRestoreGhostty true  # include Ghostty on login restore
-$OMASESSION config set terminalPrograms "nvim,btop" # relaunch these inside their terminal
-$OMASESSION config set restoreOrder auto       # slot order only with window_slot_order() (true/false force it)
+$OMASESSION config set browserRepair true      # move restarted browser windows back
+$OMASESSION config set browserRepairChrome true # include Chrome in that repair
+$OMASESSION config set appRestoreGhostty true  # include Ghostty in the login restore
+$OMASESSION config set terminalPrograms "nvim,btop" # programs a terminal comes back running
+$OMASESSION config set restoreOrder auto       # slot order only with window_slot_order(); true/false force it
 ```
-
-The panel's **Google Chrome** action runs `restore-app google-chrome`, asking
-Chrome to restore its own saved windows and tabs before OmaSession places them.
-The **Ghostty** action runs `restore-app ghostty`; it can adopt an open
-terminal or launch the saved terminal command. `restore-browser google-chrome`
-remains available for repairing the workspaces of Chrome windows that are
-already open. The native Chrome path may update the stopped profile's guarded
-restore metadata before launching it; it never rewrites a live profile.
 
 ## Remove
 
-**In this order** — the CLI lives inside the plugin's directory, so
-uninstall first, or `omarchy plugin remove` deletes it out from under
-itself, leaving the timer, the login-restore line, and any browser policy
-still active with nothing left to clean them up:
+**In this order.** The CLI lives inside the plugin's directory, so run
+`uninstall` first. Otherwise `omarchy plugin remove` deletes the CLI and
+leaves the timer, the login-restore line and any browser policy active with
+nothing left to clean them up:
 
 ```
 OMASESSION=~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession
@@ -231,42 +259,46 @@ sudo rm -f /etc/opt/chrome/policies/managed/omasession-no-promo.json   # only if
 omarchy plugin remove brenoperucchi.omasession
 ```
 
-`uninstall` disables the snapshot timer, removes only the login-restore
-line it added, and prints the exact `sudo rm -f` for any browser policy
-file it finds still present (it's machine-wide, so removing it is a
-separate, explicit command — swap in whichever vendor path it reports).
-Saved sessions under `~/.local/share/omasession/` are left alone.
+`uninstall` disables the snapshot timer, removes only the login-restore line
+it added, and prints the exact `sudo rm -f` for any browser policy file it
+still finds. That file is machine-wide, so removing it is a separate command;
+use whichever path it reports. Saved sessions under
+`~/.local/share/omasession/` are left alone.
 
 ## Where it actually is
 
 | Piece | State |
 |---|---|
-| `lib/replay.py` — replay engine | **works**, validated across four real reboots |
-| `lib/session-save.sh` — save + guard | **works**, 25/25 in `test/guard-cases.sh` |
-| `lib/resolve.py` — arbitrary application resolver | **works**, 19/19 against a real desktop |
-| `bin/browser-setup --list-paths` | **works** — unprivileged, used by install/uninstall to check |
-| `bin/omasession` — CLI | **works**, exercised end to end in the lab |
-| `systemd/` snapshot timer | **works**, written and enabled by `install` |
-| `Panel.qml` — bar widget | **works**, reads `status --json` live |
+| `lib/replay.py`, restore | **works**, across real reboots in the lab |
+| `lib/session-save.sh`, save and guard | **works**, covered by `test/guard-cases.sh` |
+| `lib/resolve.py`, the application resolver | **works**, 19/19 on a real desktop |
+| Terminal programs | **works** in Ghostty, foot and kitty, across a reboot |
+| Browser profiles and web apps | **works** on Chromium and Chrome in the lab; Brave and Vivaldi not tested there |
+| History and named sessions | **works**, on the snapshot timer |
+| `Panel.qml`, the bar widget | **works**, reads `status --json`, `list` and `layout` live |
+| `bin/omasession`, the CLI | **works**, exercised end to end in the lab |
+| `bin/browser-setup --list-paths` | **works**, unprivileged, used by install and uninstall |
+
+The suites in `test/` run without a desktop. The lab numbers come from a QEMU
+guest running Omarchy 4 with Hyprland 0.56.2.
 
 ## Docs
 
-- [`CHANGELOG.md`](CHANGELOG.md) — release history and user-visible changes.
-- [GitHub Releases](https://github.com/brenoperucchi/omasession/releases) — tagged release notes.
-- [`docs/DESIGN.md`](docs/DESIGN.md) — what was measured, what it forced.
-- [`docs/PANEL.md`](docs/PANEL.md) — the panel's states and the Omarchy
-  shell traps that cost the most.
-- [`docs/plans/`](docs/plans/) — every question, open and closed, with the
+- [`CHANGELOG.md`](CHANGELOG.md): release history and user-visible changes.
+- [GitHub Releases](https://github.com/brenoperucchi/omasession/releases): tagged release notes.
+- [`docs/DESIGN.md`](docs/DESIGN.md): what was measured, and what it forced.
+- [`docs/PANEL.md`](docs/PANEL.md): the panel's states and the Omarchy shell
+  traps that cost the most.
+- [`docs/tiled-layout.md`](docs/tiled-layout.md): Dwindle reconstruction,
+  requirements and testing.
+- [`docs/plans/`](docs/plans/): every question, open and closed, with the
   measurement behind it.
-
-Every number above is an observation from a QEMU guest running Omarchy
-4.0.1 with Hyprland 0.56.2, not an estimate.
 
 ## Related projects
 
-- [OmaBackup](https://github.com/brenoperucchi/omabackup) — backs up and
-  restores Omarchy's dotfiles and configuration, complementing OmaSession's
-  restoration of live application windows and workspaces.
+- [OmaBackup](https://github.com/brenoperucchi/omabackup) backs up and
+  restores Omarchy's dotfiles and configuration. OmaSession restores the live
+  windows and workspaces on top of it.
 
 ## License
 
