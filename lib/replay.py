@@ -37,7 +37,7 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from browser_session import repair_sessions  # noqa: E402
+from browser_session import repair_sessions, session_window_count  # noqa: E402
 from resolve import skip_env_wrapper  # noqa: E402
 from safe_fs import Refused, TooLarge, open_dir_chain, read_capped_path, write_bytes  # noqa: E402
 from tiled_layout import restore_tiled  # noqa: E402
@@ -46,6 +46,7 @@ SESSION = Path.home() / ".local/share/omasession/sessions/last.toml"
 WINDOW_TIMEOUT = 15.0
 BROWSER_TIMEOUT = 40.0
 BROWSER_QUIET = 10.0    # allow slower profiles to finish native session restore
+BROWSER_START = 4.0     # longest wait for a cold browser before handing it more profiles
 SETTLE = 0.4
 
 # Ordered restore. A layout that places windows by the order they arrive -- a
@@ -757,7 +758,8 @@ def arm_browser_profile(app: str, profile: str = "Default") -> bool:
         return False
 
 
-def repair_browser_session(app: str, want: int) -> None:
+def repair_browser_session(app: str, want: int,
+                           profiles: list[str] | tuple[str, ...] = ("Default",)) -> None:
     """Undo the window closes a window-by-window shutdown left in the session.
 
     Omarchy's menu reboot closes windows one at a time and Chromium drops each
@@ -765,26 +767,38 @@ def repair_browser_session(app: str, want: int) -> None:
     proven in the lab, see docs/plans/008 and lib/browser_session.py. Runs only
     after arm_browser_profile, which refuses while the browser is running.
     Never fails the restore: at worst the session is left as the browser wrote it.
+
+    Each profile keeps its own session, so each is repaired. The save cannot
+    tell which profile a window was in -- they share a class -- so `want` is
+    shared: a profile may reopen only what the other profiles' sessions leave
+    of it, and all of them together never reopen more than the save had.
     """
     if app not in SESSION_REPAIR_BROWSERS:
         return
     spec = BROWSERS[app]
-    prefs = Path(spec["profile"]).expanduser()
-    # arm_browser_profile already refused a running browser; checked again here
-    # because rewriting a session file under a live browser corrupts it.
-    if profile_in_use(prefs, spec.get("comm", spec["binary"])):
-        print(f"  {app} session: left as is: the browser is running")
-        return
-    sessions = prefs.parent / "Sessions"
+    root = profile_root(app)
     state_dir = Path(os.environ.get("XDG_STATE_HOME",
                                     str(Path.home() / ".local/state"))) / "omasession"
-    # Anything at all goes to the log: a bug here must not cost the user the
-    # rest of the restore.
-    try:
-        note = repair_sessions(sessions, state_dir / "browser-sessions" / app, want)
-    except Exception as exc:
-        note = f"left as is: {type(exc).__name__}: {exc}"
-    print(f"  {app} session: {note}")
+    backups = state_dir / "browser-sessions" / app
+    counts = {p: session_window_count(root / p / "Sessions") for p in profiles}
+    for profile in profiles:
+        label = f"{app} session" if len(profiles) == 1 else f"{app} {profile} session"
+        # arm_browser_profile already refused a running browser; checked again
+        # here because rewriting a session file under a live browser corrupts it.
+        if profile_in_use(root / profile / "Preferences", spec.get("comm", spec["binary"])):
+            print(f"  {label}: left as is: the browser is running")
+            continue
+        room = want - sum(n for p, n in counts.items() if p != profile)
+        # Anything at all goes to the log: a bug here must not cost the user
+        # the rest of the restore.
+        try:
+            note = repair_sessions(root / profile / "Sessions",
+                                   backups if profile == "Default" else backups / profile,
+                                   room)
+            counts[profile] = session_window_count(root / profile / "Sessions")
+        except Exception as exc:
+            note = f"left as is: {type(exc).__name__}: {exc}"
+        print(f"  {label}: {note}")
 
 
 def browser_command(command: str, *, restore_session: bool = True,
@@ -854,19 +868,16 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
         if not armed:
             print(f"  ! no profile for {app}, falling back to per-window launch")
             return sum(restore(s, claimed, i, want) for i, s in enumerate(specs, 1))
-        # The repair reads Default's session and counts every saved window, so
-        # it is only right when Default is the one profile being restored.
-        if armed == ["Default"]:
-            repair_browser_session(app, want)
-        elif app in SESSION_REPAIR_BROWSERS:
-            print(f"  {app} session: left as is: {len(armed)} profiles restored")
+        repair_browser_session(app, want, armed)
         known = {c["address"] for c in mapped()} | claimed
         for i, profile in enumerate(armed):
+            # The first launch starts the browser; the rest are handed to it,
+            # which only works once it listens. Its first window says it does,
+            # so a single profile never waits here.
+            if i == 1:
+                find_new(known, BROWSER_START, app)
             cmd = browser_command(raw_cmd, profile=profile)
             dispatch("exec_cmd", f"uwsm app -- {cmd}")
-            # The first launch starts the browser; the rest are handed to it.
-            # Launched back to back, the later ones can land before it listens.
-            time.sleep(4.0 if i == 0 else 1.0)
 
         # Wait for the browser to reopen what it intends to -- but stop as soon
         # as it settles. A fixed wait burns the whole timeout whenever the

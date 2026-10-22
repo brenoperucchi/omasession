@@ -198,6 +198,20 @@ def _write_atomic(path: Path, content: bytes) -> None:
         raise
 
 
+def session_window_count(sessions: Path) -> int:
+    """Windows open in the session the browser will read next; 0 if unknown."""
+    files = _session_files(sessions) if sessions.is_dir() else []
+    if not files:
+        return 0
+    path = files[-1][1]
+    try:
+        if path.stat().st_size > MAX_SESSION_BYTES:
+            return 0
+        return len(open_windows(path.read_bytes()))
+    except (OSError, ValueError):
+        return 0
+
+
 def repair_sessions(sessions: Path, backups: Path, max_windows: int) -> str:
     """Repair the session Chrome will read next; return one line for the log.
 

@@ -257,6 +257,15 @@ class RepairProfile(unittest.TestCase):
 
         self.assertIn("no session file", note)
 
+    def test_window_count_reads_the_newest_session(self) -> None:
+        (self.sessions / "Session_100").write_bytes(session(*four_windows()))
+        (self.sessions / "Session_200").write_bytes(session(*four_windows(), *close_all_tail()))
+
+        self.assertEqual(S.session_window_count(self.sessions), 1)
+        self.assertEqual(S.session_window_count(self.sessions / "nope"), 0)
+        (self.sessions / "Session_300").write_bytes(b"not a session")
+        self.assertEqual(S.session_window_count(self.sessions), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
