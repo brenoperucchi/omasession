@@ -31,42 +31,60 @@ def monitor_box(mon: dict) -> dict | None:
     except (KeyError, TypeError, ValueError):
         return None
     # Transforms 1, 3, 5 and 7 are quarter turns: the screen stands on its side.
-    if int(mon.get("transform") or 0) % 2 == 1:
+    if transform(mon) % 2 == 1:
         w, h = h, w
     return {"x": x, "y": y, "w": w / scale, "h": h / scale}
+
+
+def transform(mon: dict) -> int:
+    try:
+        return int(mon.get("transform") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def pair(value: object) -> tuple[float, float]:
+    """A saved [x, y] or [w, h]; (0, 0) when it is anything else."""
+    try:
+        a, b = value  # type: ignore[misc]
+        return float(a), float(b)
+    except (TypeError, ValueError):
+        return 0.0, 0.0
 
 
 def label(window: dict) -> str:
     """What a person would call the window: its app (or a web app's name), plus
     the program a terminal runs ("Ghostty · btop")."""
-    name = captured.friendly(window.get("app_id", ""))
-    cmd = window.get("launch_cmd") or ""
-    for flag in (" -e ", " -- "):
-        if flag in cmd:
-            program = cmd.split(flag, 1)[1].split()[0].strip("'\"")
-            return f"{name} · {Path(program).name}"
-    return name
+    name = captured.friendly(str(window.get("app_id", "")))
+    program = captured.terminal_program(window.get("launch_cmd"))
+    return f"{name} · {program}" if program else name
 
 
 def load(session_dir: Path, name: str) -> dict:
     toml = session_dir / f"{name}.toml"
     sidecar = session_dir / f"{name}.titles.json"
     windows = tomllib.loads(captured._read_capped(toml)).get("window", [])
+    if not isinstance(windows, list):
+        raise ValueError(f"{toml.name}: window is not a list of tables")
+    windows = [w for w in windows if isinstance(w, dict)]
     try:
         side = json.loads(captured._read_capped(sidecar))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         side = {}
 
     monitors = []
-    for mon in side.get("monitors", []) if isinstance(side, dict) else []:
+    saved = side.get("monitors", []) if isinstance(side, dict) else []
+    for mon in saved if isinstance(saved, list) else []:
+        if not isinstance(mon, dict):
+            continue
         box = monitor_box(mon)
         monitors.append({"name": mon.get("name"), "description": mon.get("description"),
                          "activeWorkspace": mon.get("activeWorkspace"),
-                         "transform": int(mon.get("transform") or 0), "box": box})
+                         "transform": transform(mon), "box": box})
 
     out_windows = []
     for w in windows:
-        pos, size = w.get("position") or [0, 0], w.get("size") or [0, 0]
+        pos, size = pair(w.get("position")), pair(w.get("size"))
         out_windows.append({
             "label": label(w), "title": w.get("title", ""), "app": w.get("app_id", ""),
             "workspace": str(w.get("workspace", "")), "monitor": w.get("monitor"),
@@ -103,8 +121,8 @@ def main() -> int:
         return 2
     try:
         print(json.dumps(load(Path(sys.argv[1]), sys.argv[2])))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        print(json.dumps({"error": str(exc)}))
+    except Exception as exc:  # the panel shows the answer; a traceback says nothing
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
         return 1
     return 0
 

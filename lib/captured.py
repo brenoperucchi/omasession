@@ -105,13 +105,22 @@ def program_map(toml_path: Path) -> dict[tuple[str, str], list[str]]:
     except (OSError, tomllib.TOMLDecodeError, ValueError):
         return found
     for w in windows:
-        cmd = w.get("launch_cmd") or ""
-        for flag in (" -e ", " -- "):
-            if flag in cmd:
-                program = Path(cmd.split(flag, 1)[1].split()[0].strip("'\"")).name
-                found.setdefault((w.get("app_id", ""), str(w.get("workspace", ""))), []).append(program)
-                break
+        program = terminal_program(w.get("launch_cmd"))
+        if program:
+            found.setdefault((w.get("app_id", ""), str(w.get("workspace", ""))), []).append(program)
     return found
+
+
+def terminal_program(cmd: object) -> str | None:
+    """The program a saved terminal launch runs ("btop" for `ghostty -e btop`);
+    None when it runs none, or the flag ends the command."""
+    if not isinstance(cmd, str):
+        return None
+    for flag in (" -e ", " -- "):
+        if flag in cmd:
+            rest = cmd.split(flag, 1)[1].split()
+            return Path(rest[0].strip("'\"")).name or None if rest else None
+    return None
 
 
 def main() -> int:

@@ -232,7 +232,12 @@ Panel {
         var data = null
         try { data = JSON.parse(String(this.text).trim()) } catch (e) {}
         root.layoutData = (data && !data.error) ? data : null
-        if (!root.layoutData) return
+        if (!root.layoutData) {
+          // Thinning can delete the snapshot being previewed. Go back to the
+          // current save instead of retrying a name that is gone.
+          if (root.layoutName !== "last") Qt.callLater(function() { root.loadLayout("last") })
+          return
+        }
         var spaces = root.layoutData.workspaces || []
         var shown = ""
         var mons = root.layoutData.monitors || []
