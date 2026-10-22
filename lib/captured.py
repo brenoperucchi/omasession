@@ -16,6 +16,7 @@ will come back when it will not is the failure this project exists to avoid.
 """
 
 import json
+import shlex
 import sys
 import tomllib
 from pathlib import Path
@@ -118,8 +119,22 @@ def terminal_program(cmd: object) -> str | None:
         return None
     for flag in (" -e ", " -- "):
         if flag in cmd:
-            rest = cmd.split(flag, 1)[1].split()
-            return Path(rest[0].strip("'\"")).name or None if rest else None
+            rest = cmd.split(flag, 1)[1]
+            try:
+                words = shlex.split(rest)
+            except ValueError:
+                words = rest.split()
+            # A program relaunched through the shell (resolve.in_shell) is
+            # named for the program, not the shell.
+            tail = f"; exec {words[0]}" if words else ""
+            if (len(words) == 3 and words[0] in R.WRAP_SHELLS and words[1] == "-ic"
+                    and words[2].endswith(tail)):
+                script = words[2][:-len(tail)]
+                try:
+                    words = shlex.split(script)
+                except ValueError:
+                    words = script.split()
+            return Path(words[0].strip("'\"")).name or None if words else None
     return None
 
 

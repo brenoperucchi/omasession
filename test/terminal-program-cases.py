@@ -11,6 +11,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 import capture  # noqa: E402
+import captured  # noqa: E402
 import resolve  # noqa: E402
 
 
@@ -18,8 +19,9 @@ def window(address: str, title: str, pid: int = 100) -> dict:
     return {"address": address, "title": title, "pid": pid, "workspace": {"id": 1}}
 
 
-def program(name: str, shell: str) -> dict:
-    return {"shell": shell, "name": name, "argv": [f"/usr/bin/{name}"], "cwd": "/work"}
+def program(name: str, shell: str, shell_name: str | None = "bash") -> dict:
+    return {"shell": shell, "shell_name": shell_name, "name": name,
+            "argv": [f"/usr/bin/{name}"], "cwd": "/work"}
 
 
 class ProgramWindowCases(unittest.TestCase):
@@ -66,10 +68,33 @@ class ProgramWindowCases(unittest.TestCase):
         with patch.object(resolve, "_children", side_effect=lambda pid: tree[str(pid)]), \
                 patch.object(resolve, "_comm", side_effect=lambda pid: comm[str(pid)]), \
                 patch.object(resolve, "from_cmdline", side_effect=lambda pid: [comm[str(pid)]]), \
+                patch.object(resolve, "_tpgid", create=True, side_effect=lambda pid: {"2": 4}.get(str(pid))), \
                 patch.object(resolve.os, "readlink", return_value="/work"):
             found = resolve.terminal_programs(1, {"flockr", "btop"})
         self.assertEqual(sorted(p["name"] for p in found), ["btop", "flockr"])
         self.assertEqual({p["name"]: p["shell"] for p in found}, {"btop": "2", "flockr": None})
+
+    def find(self, tree: dict, comm: dict, tpgid: dict, allowed: set) -> list[dict]:
+        with patch.object(resolve, "_children", side_effect=lambda pid: tree.get(str(pid), [])), \
+                patch.object(resolve, "_comm", side_effect=lambda pid: comm[str(pid)]), \
+                patch.object(resolve, "from_cmdline", side_effect=lambda pid: [comm[str(pid)]]), \
+                patch.object(resolve, "_tpgid", create=True, side_effect=lambda pid: tpgid.get(str(pid))), \
+                patch.object(resolve.os, "readlink", return_value="/work"):
+            return resolve.terminal_programs(1, allowed)
+
+    def test_the_foreground_job_is_the_program_not_the_first_child(self) -> None:
+        # nvim suspended with Ctrl-Z, then btop: both are children of the
+        # shell, and the window shows btop.
+        found = self.find({"1": ["2"], "2": ["3", "4"]},
+                          {"2": "bash", "3": "nvim", "4": "btop"}, {"2": 4}, {"nvim", "btop"})
+        self.assertEqual([p["name"] for p in found], ["btop"])
+        self.assertEqual(found[0]["shell_name"], "bash")
+
+    def test_a_shell_at_its_prompt_runs_no_program(self) -> None:
+        # A suspended or background job is still a child; at the prompt the
+        # shell is its own foreground group.
+        found = self.find({"1": ["2"], "2": ["3"]}, {"2": "bash", "3": "nvim"}, {"2": 2}, {"nvim"})
+        self.assertEqual(found, [])
 
     def test_nothing_allowed_means_nothing_found(self) -> None:
         self.assertEqual(resolve.terminal_programs(1, set()), [])
@@ -77,6 +102,11 @@ class ProgramWindowCases(unittest.TestCase):
     def test_allowed_programs_parse_the_config_list(self) -> None:
         with patch.dict(capture.os.environ, {"OMASESSION_TERMINAL_PROGRAMS": " flockr, btop ,,"}):
             self.assertEqual(capture.allowed_programs(), {"flockr", "btop"})
+
+
+# A program comes back inside the user's shell: the rc files set PATH (mise,
+# ~/.local/bin), and quitting the program leaves a prompt, not a closed window.
+BTOP = ["bash", "-ic", "/usr/bin/btop; exec bash"]
 
 
 class WithProgramCases(unittest.TestCase):
@@ -89,36 +119,65 @@ class WithProgramCases(unittest.TestCase):
         moved = {**program("btop", "11"), "cwd": "/gone"}
         with patch.object(resolve.os.path, "isdir", return_value=False):
             self.assertEqual(resolve.with_program(["foot", "--working-directory=/work"], moved),
-                             ["foot", "--working-directory=/work", "--", "/usr/bin/btop"])
+                             ["foot", "--working-directory=/work", "--", *BTOP])
 
     def test_ghostty_gets_dash_e_after_its_own_flags(self) -> None:
         argv = resolve.with_program(["ghostty"], program("flockr", "11"))
         self.assertEqual(argv, ["ghostty", "--gtk-single-instance=false",
-                                "--working-directory=/work", "-e", "/usr/bin/flockr"])
+                                "--working-directory=/work", "-e",
+                                "bash", "-ic", "/usr/bin/flockr; exec bash"])
 
     def test_foot_gets_the_program_after_double_dash(self) -> None:
         argv = resolve.with_program(["foot", "--working-directory=/work"], program("btop", "11"))
-        self.assertEqual(argv, ["foot", "--working-directory=/work", "--", "/usr/bin/btop"])
+        self.assertEqual(argv, ["foot", "--working-directory=/work", "--", *BTOP])
 
     def test_foot_and_kitty_start_in_the_programs_directory(self) -> None:
         moved = {**program("btop", "11"), "cwd": "/elsewhere"}
         self.assertEqual(resolve.with_program(["foot", "-D", "/work", "--title", "t"], moved),
-                         ["foot", "--title", "t", "--working-directory=/elsewhere", "--", "/usr/bin/btop"])
+                         ["foot", "--title", "t", "--working-directory=/elsewhere", "--", *BTOP])
         self.assertEqual(resolve.with_program(["kitty", "--directory=/work"], moved),
-                         ["kitty", "--directory=/elsewhere", "--", "/usr/bin/btop"])
+                         ["kitty", "--directory=/elsewhere", "--", *BTOP])
 
     def test_another_options_value_is_never_taken_for_the_directory(self) -> None:
         moved = {**program("btop", "11"), "cwd": "/elsewhere"}
         self.assertEqual(resolve.with_program(["foot", "--title", "-Dashboard"], moved),
                          ["foot", "--title", "-Dashboard", "--working-directory=/elsewhere",
-                          "--", "/usr/bin/btop"])
+                          "--", *BTOP])
 
     def test_a_launch_that_already_runs_a_command_is_left_alone(self) -> None:
         self.assertIsNone(resolve.with_program(["foot", "--", "nvim"], program("btop", "11")))
         self.assertIsNone(resolve.with_program(["ghostty", "-e", "nvim"], program("btop", "11")))
 
+    def test_arguments_are_quoted_for_the_shell(self) -> None:
+        notes = {**program("nvim", "11", "zsh"), "argv": ["nvim", "my notes.md"]}
+        self.assertEqual(resolve.with_program(["foot"], notes)[-3:],
+                         ["zsh", "-ic", "nvim 'my notes.md'; exec zsh"])
+
+    def test_a_shell_it_cannot_drive_gets_the_program_directly(self) -> None:
+        self.assertEqual(resolve.with_program(["foot"], program("btop", "11", "nu")),
+                         ["foot", "--working-directory=/work", "--", "/usr/bin/btop"])
+
+    def test_a_program_with_no_shell_above_it_uses_the_login_shell(self) -> None:
+        with patch.dict(resolve.os.environ, {"SHELL": "/usr/bin/fish"}):
+            argv = resolve.with_program(["foot"], program("btop", "11", None))
+        self.assertEqual(argv[-3:], ["fish", "-ic", "/usr/bin/btop; exec fish"])
+
     def test_unknown_terminal_is_left_alone(self) -> None:
         self.assertIsNone(resolve.with_program(["wezterm"], program("btop", "11")))
+
+
+class LabelCases(unittest.TestCase):
+    """The panel names the program, not the shell that relaunches it."""
+
+    def test_a_program_run_through_the_shell_is_named(self) -> None:
+        cmd = resolve.command({"argv": ["foot", "--working-directory=/w", "--", *BTOP]})
+        self.assertEqual(captured.terminal_program(cmd), "btop")
+        cmd = resolve.command({"argv": ["ghostty", "-e", "zsh", "-ic", "nvim 'my notes.md'; exec zsh"]})
+        self.assertEqual(captured.terminal_program(cmd), "nvim")
+
+    def test_a_shell_the_user_launched_is_still_the_shell(self) -> None:
+        self.assertEqual(captured.terminal_program("foot -- bash"), "bash")
+        self.assertEqual(captured.terminal_program("foot -- tmux new -A -s 0"), "tmux")
 
 
 if __name__ == "__main__":

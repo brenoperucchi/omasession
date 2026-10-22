@@ -29,6 +29,9 @@ request.
   foreground could repeat a build or a delete. When one Ghostty process
   serves several windows, each program goes to the window whose title names
   it, then by elimination. Works with Ghostty (`-e`), foot and kitty (`--`).
+  The program runs inside your shell, so it finds what your shell config puts
+  on PATH and quitting it leaves you at a prompt. Contributed by @dmkenney in
+  #5.
 
 ## 0.4.1 — 2026-10-21
 

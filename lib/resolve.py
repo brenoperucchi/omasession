@@ -560,8 +560,8 @@ def terminal_programs(pid: int, allowed: set[str]) -> list[dict]:
     the user left running is that shell's child (`ghostty -> bash -> flockr`).
     Only programs the user listed count: relaunching whatever happened to be in
     the foreground -- a build, an `rm` -- would run it again at login. Each hit
-    is {"shell", "name", "argv", "cwd"}; matching it to a window is the
-    caller's job, because one terminal process can serve several windows.
+    is {"shell", "shell_name", "name", "argv", "cwd"}; matching it to a window
+    is the caller's job, because one terminal process can serve several windows.
     """
     found = []
     if not allowed:
@@ -576,15 +576,19 @@ def terminal_programs(pid: int, allowed: set[str]) -> list[dict]:
             cwd = os.readlink(f"/proc/{kid}/cwd")
         except OSError:
             cwd = None
-        return {"shell": shell, "name": name, "argv": argv or [name], "cwd": cwd}
+        return {"shell": shell, "shell_name": _comm(shell) if shell else None,
+                "name": name, "argv": argv or [name], "cwd": cwd}
 
     for child in _children(pid):
         if _comm(child) in SHELLS:
-            for kid in _children(child):
-                hit = listed(kid, child)
+            # The window shows the shell's foreground job, not its first child:
+            # a job suspended with Ctrl-Z or sent to the background is a child
+            # too. At the prompt the shell is its own foreground group.
+            fg = str(_tpgid(child) or "")
+            if fg and fg != child and fg in _children(child):
+                hit = listed(fg, child)
                 if hit:
                     found.append(hit)
-                    break
         else:
             # A terminal started with `-e program` (as a restore does) runs it
             # directly, with no shell in between.
@@ -615,7 +619,31 @@ def with_program(argv: list[str], program: dict) -> list[str] | None:
         # The program may have changed directory since the terminal opened:
         # its own directory replaces the one the terminal was started with.
         argv = drop_cwd_option(argv, binary) + [f"{CWD_OPTIONS[binary][0]}={program['cwd']}"]
-    return argv + [flag] + program["argv"]
+    return argv + [flag] + in_shell(program)
+
+
+# Shells that take `-ic` and `; exec <shell>` alike. A program relaunched
+# through one gets the PATH its rc files set (mise, ~/.local/bin), and quitting
+# it leaves a prompt instead of closing the window.
+WRAP_SHELLS = {"bash", "zsh", "fish"}
+
+
+def in_shell(program: dict) -> list[str]:
+    """`program`'s argv run by the shell it was found under, or the login
+    shell when it had none; the bare argv for a shell not in WRAP_SHELLS."""
+    shell = program.get("shell_name") or Path(os.environ.get("SHELL", "")).name
+    if shell not in WRAP_SHELLS:
+        return program["argv"]
+    return [shell, "-ic", f"{shlex.join(program['argv'])}; exec {shell}"]
+
+
+def _tpgid(pid) -> int | None:
+    """Foreground process group of `pid`'s terminal (field 8 of its stat)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return int(stat.rpartition(")")[2].split()[5])
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 CWD_OPTIONS = {"foot": ("--working-directory", "-D"), "kitty": ("--directory", "-d")}
