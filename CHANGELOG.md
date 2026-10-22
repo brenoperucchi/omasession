@@ -42,6 +42,7 @@ request.
   Ordering runs only when that function exists, so Dwindle and Master users
   see no change; `restoreOrder true` or `false` overrides that. A save taken
   while windows are parked is skipped, so `last` never loses them.
+  Contributed by @dmkenney in #8.
 
 ## 0.4.1 — 2026-10-21
 
