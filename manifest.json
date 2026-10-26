@@ -7,10 +7,12 @@
   "license": "MIT",
   "description": "Reopens the windows you had open, on the workspaces they were on, after a reboot or a crash -- speaking the Lua IPC that Hyprland 0.56 actually accepts.",
   "kinds": [
-    "bar-widget"
+    "bar-widget",
+    "service"
   ],
   "entryPoints": {
-    "barWidget": "Panel.qml"
+    "barWidget": "Panel.qml",
+    "service": "Service.qml"
   },
   "barWidget": {
     "displayName": "OmaSession",

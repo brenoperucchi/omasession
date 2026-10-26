@@ -213,8 +213,14 @@ def _resolve(path: str, create: bool, final_mode: str):
             except FileNotFoundError:
                 if not (create and want_dir):
                     raise
-                os.mkdir(part, dir_fd=cur)
-                os.chmod(part, 0o700, dir_fd=cur)
+                # Another process can create it between the lstat and here
+                # (two login restores starting together). Then it is not ours
+                # to chmod; it is checked below like any existing component.
+                try:
+                    os.mkdir(part, dir_fd=cur)
+                    os.chmod(part, 0o700, dir_fd=cur)
+                except FileExistsError:
+                    pass
                 st = os.lstat(part, dir_fd=cur)
             if stat.S_ISLNK(st.st_mode):
                 _follow(cur, part, queue)

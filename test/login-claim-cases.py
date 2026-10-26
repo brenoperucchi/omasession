@@ -54,6 +54,24 @@ class SafeFsClaim(unittest.TestCase):
                                   range(8)))
         self.assertEqual(sorted(codes), [0] + [6] * 7)
 
+    def test_losing_the_race_to_create_the_directory_is_not_an_error(self) -> None:
+        # Two login callers start together and both find the directory
+        # missing; the second mkdir then fails with EEXIST.
+        sys.path.insert(0, str(ROOT / "lib"))
+        import safe_fs
+        from unittest import mock
+
+        real_mkdir = os.mkdir
+
+        def mkdir_after_another_process(path, mode=0o777, *, dir_fd=None):
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            real_mkdir(path, mode, dir_fd=dir_fd)
+
+        with mock.patch.object(safe_fs.os, "mkdir", mkdir_after_another_process):
+            fd = safe_fs.open_dir_chain(str(self.dir), create=True)
+        os.close(fd)
+        self.assertTrue(self.dir.is_dir())
+
     def test_a_symlink_in_place_of_the_claim_is_refused(self) -> None:
         self.dir.mkdir(mode=0o700)
         victim = Path(self.tmp.name) / "victim"
@@ -81,6 +99,10 @@ class LoginRestoreOnce(unittest.TestCase):
             "PATH": "/usr/bin:/bin",
         }
         self.marker = self.runtime / "omasession" / f"login-restore.{SIG}"
+        # The login restore runs only while the plugin is enabled (setup-cases.py).
+        shell = base / "config" / "omarchy" / "shell.json"
+        shell.parent.mkdir(parents=True)
+        shell.write_text('{"version": 1, "plugins": [{"id": "brenoperucchi.omasession"}]}\n')
 
     def tearDown(self) -> None:
         self.tmp.cleanup()

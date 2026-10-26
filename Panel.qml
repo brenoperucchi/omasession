@@ -440,6 +440,15 @@ Panel {
   }
   readonly property var captured:      status ? status.captured : []
   readonly property bool guardRefused: status ? status.refused : false
+  // Mock statuses carry neither field, so only a real status can raise this.
+  readonly property string automationOff: {
+    if (root.mockMode || !root.status) return ""
+    if (root.status.pluginEnabled === false)
+      return "Automatic save and login restore are paused: omarchy-shell does not list this plugin as enabled."
+    if (root.status.timer !== undefined && root.status.timer !== "active")
+      return "Automatic save is off: the snapshot timer is not running. Run `omasession install` to set it up."
+    return ""
+  }
   readonly property bool browserRepair: status ? status.browserRepair : true
   readonly property bool browserRepairChrome: browserRepairChromeOverride !== null
                                              ? browserRepairChromeOverride
@@ -787,6 +796,29 @@ Panel {
                     onClicked: restoreProc.running = true
                   }
                 }
+              }
+            }
+
+            // The plugin's service sets up the timer and the login restore;
+            // until it has, or after `omasession uninstall`, nothing is saved
+            // in the background, which the panel would otherwise not show.
+            Rectangle {
+              visible: root.automationOff !== ""
+              width: parent.width
+              height: automationText.implicitHeight + Style.space(12)
+              radius: Style.space(3)
+              color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.10)
+              Text {
+                textFormat: Text.PlainText
+                id: automationText
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.margins: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                wrapMode: Text.WordWrap
+                color: root.fg
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                text: root.automationOff
               }
             }
 

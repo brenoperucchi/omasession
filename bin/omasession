@@ -10,7 +10,8 @@
 #   omasession list [--json]      named sessions and the history of `last`
 #   omasession layout [name]      a saved session as drawable geometry (JSON, for the panel)
 #   omasession resolve [--json]   which command each open window resolves to
-#   omasession install            timer, login restore, browser policy
+#   omasession install [--if-needed]  timer and login restore (--if-needed:
+#                                 what the plugin's service runs on load)
 #   omasession uninstall          undo install
 #   omasession config get <key>   read one config value (empty if unset)
 #   omasession config set <key> <value>   persist one config value
@@ -67,6 +68,10 @@ SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/omasession/sessions}"
 LOGIN_CLAIM_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omasession"
 
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+# The shell's own config, read to know whether the plugin is enabled
+# (plugin_enabled). Omarchy runs no hook of a plugin on disable or remove.
+SHELL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy"
+PLUGIN_ID="brenoperucchi.omasession"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
 AUTOSTART_NAME="autostart.lua"
 AUTOSTART="$AUTOSTART_DIR/$AUTOSTART_NAME"
@@ -218,8 +223,44 @@ hypr_env() {
     [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]
 }
 
+# ── enabled ──────────────────────────────────────────────────────────────────
+# Whether omarchy-shell has the plugin enabled, by the same rules as its
+# PluginRegistry.isEnabled: listed in the bar layout (or in `plugins`) and not
+# in `disabledPlugins`. A shell.json that is missing, unparsable or without
+# `version: 1` makes the shell use its defaults, which never list a
+# third-party plugin. `omarchy plugin remove` disables before it deletes, so
+# this also stops a checkout that outlives a symlinked install.
+#
+# Only the automatic paths ask (the timer's save, the login restore). They
+# keep running from systemd and autostart.lua after the plugin is disabled or
+# removed, and Omarchy gives the plugin no hook to stop them.
+plugin_enabled() {
+    local raw
+    raw="$(safe_read "$SHELL_CONFIG_DIR" shell.json)" || return 1
+    jq -e --arg id "$PLUGIN_ID" '
+        def arr: if type == "array" then . else [] end;
+        def obj: if type == "object" then . else {} end;
+        def entry_id: if type == "object" then .id else . end;
+        type == "object" and .version == 1
+        and ((.disabledPlugins | arr | index($id)) == null)
+        and ((.bar | obj | .id) == $id
+             or ([(.bar | obj | .layout | obj) as $l
+                  | ($l.left, $l.center, $l.right) | arr | .[] | entry_id]
+                 | index($id)) != null
+             or ([.plugins | arr | .[] | entry_id] | index($id)) != null)
+    ' >/dev/null 2>&1 <<<"$raw"
+}
+
 # ── save ─────────────────────────────────────────────────────────────────────
 cmd_save() {
+    # --if-enabled is what the snapshot timer runs.
+    if [[ "${1:-}" == "--if-enabled" ]]; then
+        shift
+        if ! plugin_enabled; then
+            say "the plugin is not enabled in omarchy-shell -- nothing to do"
+            return 0
+        fi
+    fi
     local name="${1:-last}" out rc repair repair_chrome terminal_programs
     repair="$(config_get browserRepair "$DEFAULT_BROWSER_REPAIR")"
     # terminalPrograms: comma list of programs to relaunch inside their
@@ -265,6 +306,10 @@ cmd_restore() {
         shift
         if [[ "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" == "false" ]]; then
             say "restore on login is off -- nothing to do"
+            return 0
+        fi
+        if ! plugin_enabled; then
+            say "the plugin is not enabled in omarchy-shell -- nothing to do"
             return 0
         fi
         login=1
@@ -475,6 +520,9 @@ status_json() {
 
     local timer="inactive"
     systemctl --user is-active --quiet omasession-snapshot.timer 2>/dev/null && timer="active"
+    # The timer and the login restore do nothing while this is false.
+    local plugin_on=false
+    plugin_enabled && plugin_on=true
 
     # Use the same pair-selection rules as replay.py for app membership. The
     # sidecar is presentation data and may be absent even when a valid TOML
@@ -523,6 +571,7 @@ PY
         --argjson captured "$captured" \
         --arg lastSave "$when" \
         --arg timer "$timer" \
+        --argjson pluginEnabled "$plugin_on" \
         --arg session "$toml" \
         --argjson fallback "$fallback" \
         --argjson notes "$notes" \
@@ -539,6 +588,7 @@ PY
         '{windows:$windows, workspaces:$workspaces, agoSec:$agoSec,
           refused:$refused, detail:$detail,
           captured:$captured, lastSave:$lastSave, timer:$timer,
+          pluginEnabled:$pluginEnabled,
           intervalSec:$intervalSec, restoreOnLogin:$restoreOnLogin,
           browserRepair:$browserRepair, browserRepairChrome:$browserRepairChrome,
           appRestoreGhostty:$appRestoreGhostty,
@@ -588,6 +638,8 @@ cmd_status() {
     [[ "$(jq -r .usingFallback <<<"$s")" != "true" ]] || \
         err "the current session is not usable; the restore would use the previous generation"
     [[ "$timer" == active ]] || err "snapshot timer is not running (omasession install)"
+    [[ "$(jq -r .pluginEnabled <<<"$s")" == true ]] || \
+        err "the plugin is not enabled in omarchy-shell -- automatic save and login restore are paused"
     [[ "$refused" == false ]] || err "last save refused -- session preserved: $detail"
     jq -r '.captured[]? | "  ws\(.ws)  \(.cls)  \(.title)"' <<<"$s"
 }
@@ -621,9 +673,14 @@ cmd_resolve() {
 }
 
 # ── install ──────────────────────────────────────────────────────────────────
+# write_units sets UNITS_CHANGED=1 when it had to rewrite either file. Files
+# already holding the right content are left alone, so the service's
+# `install --if-needed` on every shell start costs no daemon-reload.
+UNITS_CHANGED=0
 write_units() {
     mkdir -p "$UNIT_DIR"
     local interval; interval="$(config_get saveIntervalSec "$DEFAULT_SAVE_INTERVAL")"
+    local service_unit timer_unit
 
     # Anchored on default.target, not graphical-session.target. The obvious
     # choice was wrong, and only a real reboot caught it: on this lab's Omarchy
@@ -645,22 +702,29 @@ write_units() {
     # exits 3 ("cannot read hyprctl clients") without touching anything when
     # there is no compositor to read, and 3 is already in SuccessExitStatus
     # below.
-    cat > "$UNIT_DIR/omasession-snapshot.service" <<UNIT
+    #
+    # ConditionPathExists on both units: after `omarchy plugin remove` deletes
+    # the CLI, the timer is skipped at the next login instead of failing every
+    # interval. While the CLI is there, `save --if-enabled` does nothing for a
+    # disabled plugin.
+    service_unit="$(cat <<UNIT
 [Unit]
 Description=OmaSession session snapshot
+ConditionPathExists=$SELF/bin/omasession
 
 [Service]
 Type=oneshot
-ExecStart=$SELF/bin/omasession save
+ExecStart=$SELF/bin/omasession save --if-enabled
 # The guard reports 3 when it refuses and 4 when another save holds the lock.
 # Both are correct outcomes, not failures: without this systemd marks the unit
 # failed and the user is told something broke when nothing did.
 SuccessExitStatus=3 4
 UNIT
-
-    cat > "$UNIT_DIR/omasession-snapshot.timer" <<UNIT
+)"
+    timer_unit="$(cat <<UNIT
 [Unit]
 Description=OmaSession session snapshot
+ConditionPathExists=$SELF/bin/omasession
 
 [Timer]
 OnActiveSec=${interval}s
@@ -670,10 +734,26 @@ AccuracySec=1s
 [Install]
 WantedBy=default.target
 UNIT
-    say "units written to $UNIT_DIR (every ${interval}s)"
+)"
+    local name content
+    for name in service timer; do
+        if [[ "$name" == service ]]; then content="$service_unit"; else content="$timer_unit"; fi
+        [[ "$(cat "$UNIT_DIR/omasession-snapshot.$name" 2>/dev/null)" == "$content" ]] && continue
+        printf '%s\n' "$content" > "$UNIT_DIR/omasession-snapshot.$name"
+        UNITS_CHANGED=1
+    done
+    (( UNITS_CHANGED )) && say "units written to $UNIT_DIR (every ${interval}s)"
+    return 0
 }
 
-autostart_line() { printf 'o.launch_on_start("%s/bin/omasession restore --if-enabled")' "$SELF"; }
+# The line checks that the CLI is still there before registering the restore,
+# so a plugin removed without `uninstall` leaves an inert line, not a failed
+# command at every login. One line, so remove_login_restore finds it.
+autostart_line() { # autostart_line [plugin-dir]
+    local cli="${1:-$SELF}/bin/omasession"
+    printf 'do local f = io.open("%s") if f then f:close() o.launch_on_start("%s restore --if-enabled") end end' \
+        "$cli" "$cli"
+}
 
 # Um unico backup, tirado antes da primeira modificacao e nunca sobrescrito.
 # Marcador: toda edição nossa no autostart.lua carrega um destes, porque o
@@ -732,7 +812,7 @@ add_login_restore() {
     (( rc == 0 || rc == 3 )) || safe_read_die "$rc" "$AUTOSTART"
     (( rc == 3 )) && { err "no $AUTOSTART -- skipping login restore"; return; }
     if grep -qF "omasession restore" <<<"$content"; then
-        say "login restore already in autostart.lua"
+        guard_login_restore "$content"
         return
     fi
     backup_autostart
@@ -751,6 +831,30 @@ add_login_restore() {
     { printf '%s' "$content"; printf '\n%s\n%s\n' "$MARK_LOGIN" "$(autostart_line)"; } \
         | safe_write "$AUTOSTART_DIR" "$AUTOSTART_NAME" 644
     say "login restore added to autostart.lua"
+}
+
+# A line written by 0.5.0 or earlier registers the restore without checking
+# that the CLI exists. Guard it in place, keeping the path it already names:
+# that path may be a development checkout on purpose.
+OLD_LOGIN_LINE='^o\.launch_on_start\("([^"]*)/bin/omasession restore --if-enabled"\)$'
+guard_login_restore() { # guard_login_restore <autostart content>
+    local content="$1" line dir guarded
+    line="$(grep -E -m1 "$OLD_LOGIN_LINE" <<<"$content")" || {
+        say "login restore already in autostart.lua"
+        return 0
+    }
+    [[ "$line" =~ $OLD_LOGIN_LINE ]] || return 0
+    dir="${BASH_REMATCH[1]}"
+    guarded="$(autostart_line "$dir")"
+    local transformed
+    transformed="$(printf '%s' "$content" \
+        | OLD="$line" NEW="$guarded" awk '$0 == ENVIRON["OLD"] { print ENVIRON["NEW"]; next } { print }'
+        printf X)" || die "could not update $AUTOSTART"
+    transformed="${transformed%X}"
+    # awk ends the last line with a newline even when the file did not.
+    [[ "$content" == *$'\n' ]] || transformed="${transformed%$'\n'}"
+    printf '%s' "$transformed" | safe_write "$AUTOSTART_DIR" "$AUTOSTART_NAME" 644
+    say "login restore in autostart.lua now checks that the CLI exists"
 }
 
 remove_login_restore() {
@@ -887,9 +991,72 @@ migrate_legacy_session() {
     done
 }
 
+# ── setup state ──────────────────────────────────────────────────────────────
+# What `install --if-needed` must respect and cannot see in the files
+# themselves: that `uninstall` was run (the plugin's service would otherwise
+# set everything up again at the next shell start), and that the login line
+# was added once (so a line the user deleted stays deleted).
+#
+# The uninstall is recorded against this plugin directory (device and inode):
+# removing the plugin and adding it again clones a new directory, which sets
+# itself up like any first install, while `omarchy plugin update` keeps the
+# directory and so keeps the refusal.
+plugin_dir_id() { stat -L -c '%d:%i' "$SELF" 2>/dev/null || printf 'unknown'; }
+
+setup_state_raw() {
+    local raw
+    raw="$(safe_read "$STATE_DIR" setup.json)" || raw=""
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" && printf '%s' "$raw" || printf '{}'
+}
+
+setup_declined() {
+    jq -e --arg id "$(plugin_dir_id)" '.declinedFor == $id' >/dev/null 2>&1 <<<"$(setup_state_raw)"
+}
+
+setup_state_get() { # setup_state_get loginLine -> true|false
+    jq -r --arg k "$1" 'if .[$k] == true then "true" else "false" end' <<<"$(setup_state_raw)"
+}
+
+setup_state_set() { # setup_state_set <declined true|false> <loginLine true|false>
+    local raw doc declined_for=""
+    raw="$(setup_state_raw)"
+    [[ "$1" == true ]] && declined_for="$(plugin_dir_id)"
+    doc="$(jq -n --arg d "$declined_for" --argjson l "$2" \
+        '{loginLine:$l} + (if $d == "" then {} else {declinedFor:$d} end)')" \
+        || die "could not build setup state"
+    [[ "$(jq -cS . <<<"$raw")" == "$(jq -cS . <<<"$doc")" ]] && return 0
+    printf '%s\n' "$doc" | safe_write "$STATE_DIR" setup.json
+}
+
+login_line_present() {
+    grep -qF "omasession restore" <<<"$(safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME")"
+}
+
+# Setup and its undo hold one lock. The plugin's service runs `install
+# --if-needed` on every shell start, and a second shell start (or a manual
+# install) during it would otherwise read and rewrite autostart.lua at the
+# same time. Same re-exec as `config set`: the descriptor is opened by
+# safe_fs, never by a bash redirect.
+setup_lock() { # setup_lock <command> [args...]
+    if ! : 2>/dev/null >&7; then
+        exec /usr/bin/python3 "$SAFE_FS" exec-with-lock \
+            "$STATE_DIR" ".setup.lock" 7 -- bash "${BASH_SOURCE[0]}" "$@"
+    fi
+    flock 7
+}
+
 cmd_install() {
+    local if_needed=0
+    [[ "${1:-}" == "--if-needed" ]] && if_needed=1
     command -v jq >/dev/null || die "jq is required"
     command -v python3 >/dev/null || die "python3 is required"
+    setup_lock install "$@"
+
+    # `uninstall` asked for none of this. Only an explicit install undoes that.
+    if (( if_needed )) && setup_declined; then
+        say "setup was undone by 'omasession uninstall' -- run 'omasession install' to set it up again"
+        return 0
+    fi
 
     mkdir -p "$SESSION_DIR"
     migrate_legacy_session
@@ -919,21 +1086,44 @@ cmd_install() {
         say "config written to $CONFIG"
     fi
 
-    # Disable before rewriting: `enable` never removes a symlink left by an
-    # older [Install] section, so upgrading from a version anchored on a
-    # different target (graphical-session.target -- see write_units for why
-    # that one turned out wrong) would leave a stale .wants/ symlink pointing
-    # at the now-rewritten file, active by whichever target happens to start.
-    systemctl --user disable --now omasession-snapshot.timer >/dev/null 2>&1 || true
     write_units
-    systemctl --user daemon-reload
-    systemctl --user enable --now omasession-snapshot.timer >/dev/null 2>&1 \
-        && say "snapshot timer enabled" \
-        || err "could not enable the timer (no systemd user session?)"
+    local status=0
+    if (( ! if_needed || UNITS_CHANGED )) \
+        || ! systemctl --user is-enabled --quiet omasession-snapshot.timer 2>/dev/null \
+        || ! systemctl --user is-active --quiet omasession-snapshot.timer 2>/dev/null; then
+        # Disable before enabling again: `enable` never removes a symlink left
+        # by an older [Install] section, so upgrading from a version anchored
+        # on a different target (graphical-session.target -- see write_units
+        # for why that one turned out wrong) would leave a stale .wants/
+        # symlink, active by whichever target happens to start. `disable`
+        # removes every symlink to the unit, whatever the file now says.
+        systemctl --user disable --now omasession-snapshot.timer >/dev/null 2>&1 || true
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        if systemctl --user enable --now omasession-snapshot.timer >/dev/null 2>&1; then
+            say "snapshot timer enabled"
+        else
+            err "could not enable the timer (no systemd user session?)"
+            status=1
+        fi
+    fi
 
     # A linha entra sempre; ligar e desligar é com o config, que o painel
-    # escreve e que `restore --if-enabled` consulta no login.
-    add_login_restore
+    # escreve e que `restore --if-enabled` consulta no login. Só não volta,
+    # no --if-needed, quando o usuário a apagou depois de ela ter entrado.
+    local had_line; had_line="$(setup_state_get loginLine)"
+    if (( if_needed )) && [[ "$had_line" == true ]] && ! login_line_present; then
+        say "login restore was removed from autostart.lua -- leaving it out ('omasession install' puts it back)"
+    else
+        add_login_restore
+    fi
+    local has_line=false
+    login_line_present && has_line=true
+    [[ "$had_line" == true ]] && has_line=true
+    setup_state_set false "$has_line"
+
+    if (( if_needed )); then
+        return "$status"
+    fi
 
     # browser-setup --list-paths is the one place that knows all five vendor
     # directories -- found by review (omasession-7): this check used to hardcode
@@ -976,6 +1166,9 @@ cmd_install() {
 }
 
 cmd_uninstall() {
+    setup_lock uninstall "$@"
+    # Recorded first: the plugin's service must not set this up again.
+    setup_state_set true false
     systemctl --user disable --now omasession-snapshot.timer >/dev/null 2>&1 || true
     rm -f "$UNIT_DIR/omasession-snapshot.timer" "$UNIT_DIR/omasession-snapshot.service"
     systemctl --user daemon-reload 2>/dev/null || true
