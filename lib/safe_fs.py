@@ -417,6 +417,32 @@ def touch_safe(dir_fd: int, name: str, mode: int = 0o600) -> None:
     os.close(_open_lock_fd(dir_fd, name, mode))
 
 
+def claim_once(dir_fd: int, name: str, mode: int = 0o600) -> bool:
+    """Create `name` inside `dir_fd` only if nothing is there yet.
+
+    True for the one caller that created it, False for every other. O_EXCL
+    with O_NOFOLLOW never follows a symlink planted at `name`: the kernel
+    reports EEXIST for it like for a regular file, so a symlink is checked
+    for first and refused, to tell a planted link from a real earlier claim.
+    For the login restore, which more than one caller can start in the same
+    login (bin/omasession, restore --if-enabled).
+    """
+    _require_component(name)
+    try:
+        st = os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        st = None
+    if st is not None and stat.S_ISLNK(st.st_mode):
+        raise Refused(f"refusing {name}: a symlink where a claim file belongs")
+    try:
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     mode, dir_fd=dir_fd)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
 def _open_lock_fd(dir_fd: int, name: str, mode: int) -> int:
     """The actual safe-open behind touch_safe -- kept separate, and
     returning the fd instead of closing it, for exec_with_lock below,
@@ -516,7 +542,7 @@ def _parse(args: list[str]) -> tuple[bool, list[str]]:
 def main() -> None:
     if len(sys.argv) < 3:
         print(
-            "usage: safe_fs.py verify|read|write|copy|rename|touch|exec-with-lock "
+            "usage: safe_fs.py verify|read|write|copy|rename|touch|claim|exec-with-lock "
             "[--create] <dir> <args...>",
             file=sys.stderr,
         )
@@ -596,6 +622,14 @@ def main() -> None:
             dir_fd = open_dir_chain(rest[0], create=create)
             try:
                 touch_safe(dir_fd, rest[1], mode=mode)
+            finally:
+                os.close(dir_fd)
+        elif verb == "claim":
+            # 6 -- someone claimed it first. Not 3: that one means "absent".
+            dir_fd = open_dir_chain(rest[0], create=create)
+            try:
+                if not claim_once(dir_fd, rest[1]):
+                    sys.exit(6)
             finally:
                 os.close(dir_fd)
         else:

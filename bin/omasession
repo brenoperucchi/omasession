@@ -62,6 +62,10 @@ SAVE_STATE="$STATE_DIR/last-save.json"
 # porquê da migração. Honra a mesma variável que ele, por consistência.
 SESSION_DIR="${OMASESSION_SESSION_DIR:-$HOME/.local/share/omasession/sessions}"
 
+# One claim per Hyprland instance for the login restore (cmd_restore). The
+# runtime dir is a tmpfs, so a reboot starts with none.
+LOGIN_CLAIM_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omasession"
+
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
 AUTOSTART_NAME="autostart.lua"
@@ -256,15 +260,28 @@ cmd_restore() {
     # `restoreOnLogin` do config e a presença da linha -- e o interruptor do
     # painel escrevia só a primeira, então desligá-lo não desligava nada. Uma
     # opção que o programa ignora é o defeito que este projeto acusa nos outros.
+    local login=0
     if [[ "${1:-}" == "--if-enabled" ]]; then
         shift
         if [[ "$(config_get restoreOnLogin "$DEFAULT_RESTORE_ON_LOGIN")" == "false" ]]; then
             say "restore on login is off -- nothing to do"
             return 0
         fi
+        login=1
     fi
     local name="${1:-last}"
     hypr_env || die "no Hyprland instance -- nothing to restore into"
+    # The login restore runs once per Hyprland instance. More than one caller
+    # reaches it in the same login (the autostart.lua line, the plugin's own
+    # setup, a restarted shell), and a second restore would reshuffle a desktop
+    # already in use. The claim is taken under the lock below, so a restore
+    # that never starts leaves it free; this early look only spares a later
+    # caller the wait on that lock.
+    local claim_name="login-restore.$HYPRLAND_INSTANCE_SIGNATURE"
+    if (( login )) && safe_read "$LOGIN_CLAIM_DIR" "$claim_name" >/dev/null; then
+        say "already restored for this login -- nothing to do"
+        return 0
+    fi
     [[ -f "$SESSION_DIR/$name.toml" ]] || die "no saved session at $SESSION_DIR/$name.toml"
 
     # O restore toma o MESMO lock que o save, e o segura ate o fim.
@@ -294,6 +311,16 @@ cmd_restore() {
         if ! flock -w 10 8; then
             die "a save or restore is running -- refusing to restore on top of it"
         fi
+    fi
+
+    if (( login )); then
+        local claim_rc
+        python3 "$SAFE_FS" claim --create "$LOGIN_CLAIM_DIR" "$claim_name" && claim_rc=0 || claim_rc=$?
+        case "$claim_rc" in
+            0) ;;
+            6) say "already restored for this login -- nothing to do"; return 0 ;;
+            *) die "could not record the login restore in $LOGIN_CLAIM_DIR -- refusing to restore twice" ;;
+        esac
     fi
 
     # browserRestore ainda nao e respeitado: replay.py nao le a opcao. Dizer
