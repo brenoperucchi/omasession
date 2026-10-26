@@ -174,20 +174,25 @@ writes.
 
 ## Install
 
-The CLI lives inside the plugin's own directory. `omarchy plugin add` clones
-it there but doesn't put it on `PATH`, so every command below spells out the
-full path:
-
 ```
 omarchy plugin add https://github.com/brenoperucchi/omasession --enable
-~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession install
 ```
 
-`install` writes and enables the user-level snapshot timer (`systemctl
---user`, no root) and adds one marked login-restore line to
-`~/.config/hypr/autostart.lua`. Nothing is captured or restored before this
-step runs. It needs `python3`, `jq` and `hyprctl`, all present on a stock
-Omarchy install, and `tmux` only if a terminal is already a tmux client.
+That is the whole install. When the shell loads the plugin, its service
+writes and enables the user-level snapshot timer (`systemctl --user`, no
+root) and adds one marked login-restore line to
+`~/.config/hypr/autostart.lua`. It runs again at every shell start and only
+fixes what is missing or out of date. A login line you delete stays deleted,
+and after `omasession uninstall` it sets nothing up again until you run
+`omasession install`.
+
+While the plugin is disabled in the shell, the timer and the login line do
+nothing. OmaSession needs `python3`, `jq` and `hyprctl`, all present on a
+stock Omarchy install, and `tmux` only if a terminal is already a tmux client.
+
+The CLI lives inside the plugin's own directory. `omarchy plugin add` clones
+it there but doesn't put it on `PATH`, so the commands below spell out the
+full path.
 
 **Chrome only, one time, needs root.** This is a literal command, not a
 script:
@@ -247,10 +252,10 @@ $OMASESSION config set restoreOrder auto       # slot order only with window_slo
 
 ## Remove
 
-**In this order.** The CLI lives inside the plugin's directory, so run
-`uninstall` first. Otherwise `omarchy plugin remove` deletes the CLI and
-leaves the timer, the login-restore line and any browser policy active with
-nothing left to clean them up:
+Run `uninstall` first to leave nothing behind. The CLI lives inside the
+plugin's directory, so after `omarchy plugin remove` nothing is left to clean
+up the two unit files and the login-restore line. They stay inert (the timer
+and the line both check that the CLI exists), but they stay:
 
 ```
 OMASESSION=~/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession

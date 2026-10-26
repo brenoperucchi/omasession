@@ -4,6 +4,29 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
+## Unreleased
+
+- `omarchy plugin add ... --enable` is now the whole install. The plugin
+  declares a service that the shell starts once, and it sets up the snapshot
+  timer and the login restore line that used to need a separate `omasession
+  install`. It runs at every shell start and changes only what is missing or
+  out of date. A login line you deleted stays deleted, and nothing is set up
+  again after `omasession uninstall`. Requested in the Omarchy plugin
+  marketplace review.
+- A disabled plugin no longer saves or restores. The timer now runs `save
+  --if-enabled`, and the login restore checks the same thing: whether
+  omarchy-shell has the plugin enabled. The manual commands still work.
+- After `omarchy plugin remove` without `uninstall`, the timer and the login
+  line are inert instead of failing. Both units carry
+  `ConditionPathExists`, and the login line checks that the CLI exists. A
+  line written by an earlier version gets that check in place, keeping the
+  path it names.
+- The login restore runs once per Hyprland instance. A second caller in the
+  same login, such as the old login line together with the new setup, does
+  nothing.
+- The panel says when automatic save is off: the plugin is not enabled, or
+  the snapshot timer is not running.
+
 ## 0.5.0 — 2026-10-22
 
 - The panel has three tabs. **Windows** is the old list. **Layout** draws the
