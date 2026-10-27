@@ -269,7 +269,8 @@ systemctl() {
     for a in "$@"; do [[ "$a" == -* ]] || { verb="$a"; break; }; done
     local d="$FAKE_SYSTEMD"
     case "$verb" in
-        enable) touch "$d/enabled"; [[ " $* " == *" --now "* ]] && touch "$d/active" ;;
+        enable) [[ -e "$d/fail-enable" ]] && return 1
+                touch "$d/enabled"; [[ " $* " == *" --now "* ]] && touch "$d/active" ;;
         disable) rm -f "$d/enabled"; [[ " $* " == *" --now "* ]] && rm -f "$d/active" ;;
         start) touch "$d/active" ;;
         is-enabled) [[ -e "$d/enabled" ]] ;;
@@ -321,6 +322,18 @@ class UserChoicesSurviveUpgrades(SetupEnv):
         self.run_cli("install")
         self.assertTrue(self.timer_on())
 
+    def test_a_timer_that_failed_to_come_back_is_retried(self) -> None:
+        # Updating the units disables the timer before enabling it again; a
+        # failure there is ours, not the user's choice.
+        self.run_cli("install", "--if-needed")
+        self.assertEqual(self.run_cli("config", "set", "saveIntervalSec", "60").returncode, 0)
+        (self.systemd / "fail-enable").touch()
+        self.run_cli("install", "--if-needed")
+        self.assertFalse(self.timer_on())
+        (self.systemd / "fail-enable").unlink()
+        self.run_cli("install", "--if-needed")
+        self.assertTrue(self.timer_on())
+
     def test_a_stopped_but_enabled_timer_is_started(self) -> None:
         self.run_cli("install", "--if-needed")
         (self.systemd / "active").unlink()
@@ -347,6 +360,22 @@ class UserChoicesSurviveUpgrades(SetupEnv):
         self.assertEqual(self.autostart.read_text(), USER_AUTOSTART)
         self.run_cli("install", "--if-needed")
         self.assertFalse((self.units / "omasession-snapshot.timer").exists())
+
+    def test_a_plugin_added_again_after_a_050_uninstall_sets_itself_up(self) -> None:
+        # The 0.5.0 README's way out: uninstall, then `omarchy plugin remove`.
+        # Adding the plugin back later clones a directory newer than the
+        # autostart backup that uninstall kept.
+        self.run_cli("install")
+        self.run_cli("uninstall")
+        self.forget_setup_state()
+        clone = Path(self.tmp.name) / "plugins" / PLUGIN_ID
+        shutil.copytree(ROOT, clone, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git", "screenshots", "__pycache__"))
+        subprocess.run([str(clone / "bin" / "omasession"), "install", "--if-needed"],
+                       env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertTrue((self.units / "omasession-snapshot.timer").exists())
+        self.assertTrue(self.timer_on())
+        self.assertEqual(len(self.login_lines()), 1)
 
     def test_upgrade_keeps_a_timer_turned_off_under_050(self) -> None:
         self.run_cli("install")

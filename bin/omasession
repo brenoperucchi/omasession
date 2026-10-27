@@ -1054,10 +1054,23 @@ timer_enabled() { systemctl --user is-enabled --quiet omasession-snapshot.timer 
 # before adding the login line, and its uninstall kept that backup: a backup
 # with no line means the line was taken out, by uninstall when the units went
 # with it, by hand otherwise. Units on disk with the timer disabled mean the
-# user turned it off. Returns 1 when that was an uninstall.
+# user turned it off (or a 0.5.0 install failed to enable it; nothing on disk
+# tells the two apart, and `omasession install` fixes the second).
+#
+# A plugin directory created after the backup is a plugin removed and added
+# again, which sets itself up like a first install. Without birth times to
+# compare, the backup counts. Returns 1 when that was an uninstall.
 infer_setup_state() {
-    local bak=0 line=false timer=false
+    local bak=0 line=false timer=false dir_born bak_born
     safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME.omasession.bak" >/dev/null && bak=1
+    if (( bak )); then
+        dir_born="$(stat -L -c '%.9W' "$SELF" 2>/dev/null)" || dir_born=0
+        bak_born="$(stat -c '%.9W' "$AUTOSTART.omasession.bak" 2>/dev/null)" || bak_born=0
+        if [[ "$dir_born" =~ ^[1-9][0-9]*\.[0-9]{9}$ && "$bak_born" =~ ^[1-9][0-9]*\.[0-9]{9}$ ]] \
+            && (( 10#${dir_born/./} > 10#${bak_born/./} )); then
+            bak=0
+        fi
+    fi
     if (( bak )) && ! login_line_present; then
         if [[ ! -e "$UNIT_DIR/omasession-snapshot.timer" ]]; then
             setup_state_set true false false
@@ -1155,7 +1168,8 @@ cmd_install() {
         (( UNITS_CHANGED )) && { systemctl --user daemon-reload >/dev/null 2>&1 || true; }
         say "snapshot timer was disabled in systemd -- leaving it off ('omasession install' turns it back on)"
     fi
-    [[ "$had_timer" == true ]] && timer_on=true
+    # A failed enable after the disable above is not the user's choice.
+    [[ "$had_timer" == true ]] && (( status == 0 )) && timer_on=true
 
     # A linha entra sempre; ligar e desligar é com o config, que o painel
     # escreve e que `restore --if-enabled` consulta no login. Só não volta,
