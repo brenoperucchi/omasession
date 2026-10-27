@@ -10,9 +10,10 @@ request.
   declares a service that the shell starts once, and it sets up the snapshot
   timer and the login restore line that used to need a separate `omasession
   install`. It runs at every shell start and changes only what is missing or
-  out of date. A login line you deleted stays deleted, and nothing is set up
-  again after `omasession uninstall`. Requested in the Omarchy plugin
-  marketplace review.
+  out of date. A login line you deleted stays deleted, a timer you disabled
+  in systemd stays off, and nothing is set up again after `omasession
+  uninstall`, including when those were done under 0.5.0. Requested in the
+  Omarchy plugin marketplace review.
 - A disabled plugin no longer saves or restores. The timer now runs `save
   --if-enabled`, and the login restore checks the same thing: whether
   omarchy-shell has the plugin enabled. The manual commands still work.

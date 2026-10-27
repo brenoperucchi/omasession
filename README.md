@@ -183,8 +183,9 @@ writes and enables the user-level snapshot timer (`systemctl --user`, no
 root) and adds one marked login-restore line to
 `~/.config/hypr/autostart.lua`. It runs again at every shell start and only
 fixes what is missing or out of date. A login line you delete stays deleted,
-and after `omasession uninstall` it sets nothing up again until you run
-`omasession install`.
+a timer you disable with `systemctl --user disable` stays off, and after
+`omasession uninstall` it sets nothing up again until you run `omasession
+install`. Choices made under 0.5.0 carry over the same way.
 
 While the plugin is disabled in the shell, the timer and the login line do
 nothing. OmaSession needs `python3`, `jq` and `hyprctl`, all present on a

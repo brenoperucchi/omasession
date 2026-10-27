@@ -263,6 +263,105 @@ class InstallIfNeeded(SetupEnv):
         self.assertEqual(len(self.login_lines()), 1)
 
 
+FAKE_SYSTEMCTL = r'''
+systemctl() {
+    local verb="" a
+    for a in "$@"; do [[ "$a" == -* ]] || { verb="$a"; break; }; done
+    local d="$FAKE_SYSTEMD"
+    case "$verb" in
+        enable) touch "$d/enabled"; [[ " $* " == *" --now "* ]] && touch "$d/active" ;;
+        disable) rm -f "$d/enabled"; [[ " $* " == *" --now "* ]] && rm -f "$d/active" ;;
+        start) touch "$d/active" ;;
+        is-enabled) [[ -e "$d/enabled" ]] ;;
+        is-active) [[ -e "$d/active" ]] ;;
+        *) return 0 ;;
+    esac
+}
+'''
+
+
+class UserChoicesSurviveUpgrades(SetupEnv):
+    """The user's own choices outlast the plugin's service, including those
+    made under 0.5.0, which kept no setup.json."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.systemd = Path(self.tmp.name) / "fake-systemd"
+        self.systemd.mkdir()
+        hook = Path(self.tmp.name) / "fake-systemctl.sh"
+        hook.write_text(FAKE_SYSTEMCTL)
+        self.env["BASH_ENV"] = str(hook)
+        self.env["FAKE_SYSTEMD"] = str(self.systemd)
+
+    def timer_on(self) -> bool:
+        return (self.systemd / "enabled").exists()
+
+    def user_disables_timer(self) -> None:
+        for name in ("enabled", "active"):
+            (self.systemd / name).unlink(missing_ok=True)
+
+    def forget_setup_state(self) -> None:
+        # What a 0.5.0 install leaves: no setup.json.
+        (self.state / "omasession" / "setup.json").unlink()
+
+    def test_the_service_turns_the_timer_on(self) -> None:
+        self.run_cli("install", "--if-needed")
+        self.assertTrue(self.timer_on())
+
+    def test_a_timer_the_user_turned_off_stays_off(self) -> None:
+        self.run_cli("install", "--if-needed")
+        self.user_disables_timer()
+        self.run_cli("install", "--if-needed")
+        self.assertFalse(self.timer_on())
+        self.assertEqual(self.run_cli("config", "set", "saveIntervalSec", "60").returncode, 0)
+        self.run_cli("install", "--if-needed")
+        self.assertIn("OnUnitActiveSec=60s\n",
+                      (self.units / "omasession-snapshot.timer").read_text())
+        self.assertFalse(self.timer_on())
+        self.run_cli("install")
+        self.assertTrue(self.timer_on())
+
+    def test_a_stopped_but_enabled_timer_is_started(self) -> None:
+        self.run_cli("install", "--if-needed")
+        (self.systemd / "active").unlink()
+        self.run_cli("install", "--if-needed")
+        self.assertTrue((self.systemd / "active").exists())
+
+    def test_upgrade_keeps_a_login_line_deleted_under_050(self) -> None:
+        self.run_cli("install")
+        self.forget_setup_state()
+        self.autostart.write_text(USER_AUTOSTART)
+        self.run_cli("install", "--if-needed")
+        self.assertEqual(self.autostart.read_text(), USER_AUTOSTART)
+        self.assertTrue(self.timer_on())
+        self.run_cli("install")
+        self.assertEqual(len(self.login_lines()), 1)
+
+    def test_upgrade_keeps_an_uninstall_done_under_050(self) -> None:
+        self.run_cli("install")
+        self.run_cli("uninstall")
+        self.forget_setup_state()
+        self.run_cli("install", "--if-needed")
+        self.assertFalse((self.units / "omasession-snapshot.timer").exists())
+        self.assertFalse(self.timer_on())
+        self.assertEqual(self.autostart.read_text(), USER_AUTOSTART)
+        self.run_cli("install", "--if-needed")
+        self.assertFalse((self.units / "omasession-snapshot.timer").exists())
+
+    def test_upgrade_keeps_a_timer_turned_off_under_050(self) -> None:
+        self.run_cli("install")
+        self.user_disables_timer()
+        self.forget_setup_state()
+        self.run_cli("install", "--if-needed")
+        self.assertFalse(self.timer_on())
+        self.assertEqual(len(self.login_lines()), 1)
+
+    def test_a_first_install_still_sets_everything_up(self) -> None:
+        self.run_cli("install", "--if-needed")
+        self.assertTrue(self.timer_on())
+        self.assertEqual(len(self.login_lines()), 1)
+
+
 class StatusReportsAutomation(SetupEnv):
     def status(self) -> dict:
         result = self.run_cli("status", "--json")

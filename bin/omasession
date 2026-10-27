@@ -1005,7 +1005,8 @@ migrate_legacy_session() { # migrate_legacy_session [--new-only]
 # What `install --if-needed` must respect and cannot see in the files
 # themselves: that `uninstall` was run (the plugin's service would otherwise
 # set everything up again at the next shell start), and that the login line
-# was added once (so a line the user deleted stays deleted).
+# and the timer were set up once (so a line the user deleted stays deleted,
+# and a timer the user disabled stays off).
 #
 # The uninstall is recorded against this plugin directory (device and inode):
 # removing the plugin and adding it again clones a new directory, which sets
@@ -1025,16 +1026,18 @@ setup_declined() {
     jq -e --arg id "$(plugin_dir_id)" '.declinedFor == $id' >/dev/null 2>&1 <<<"$(setup_state_raw)"
 }
 
-setup_state_get() { # setup_state_get loginLine -> true|false
+setup_state_present() { safe_read "$STATE_DIR" setup.json >/dev/null; }
+
+setup_state_get() { # setup_state_get loginLine|timer -> true|false
     jq -r --arg k "$1" 'if .[$k] == true then "true" else "false" end' <<<"$(setup_state_raw)"
 }
 
-setup_state_set() { # setup_state_set <declined true|false> <loginLine true|false>
+setup_state_set() { # setup_state_set <declined> <loginLine> <timer>, each true|false
     local raw doc declined_for=""
     raw="$(setup_state_raw)"
     [[ "$1" == true ]] && declined_for="$(plugin_dir_id)"
-    doc="$(jq -n --arg d "$declined_for" --argjson l "$2" \
-        '{loginLine:$l} + (if $d == "" then {} else {declinedFor:$d} end)')" \
+    doc="$(jq -n --arg d "$declined_for" --argjson l "$2" --argjson t "$3" \
+        '{loginLine:$l, timer:$t} + (if $d == "" then {} else {declinedFor:$d} end)')" \
         || die "could not build setup state"
     [[ "$(jq -cS . <<<"$raw")" == "$(jq -cS . <<<"$doc")" ]] && return 0
     printf '%s\n' "$doc" | safe_write "$STATE_DIR" setup.json
@@ -1042,6 +1045,29 @@ setup_state_set() { # setup_state_set <declined true|false> <loginLine true|fals
 
 login_line_present() {
     grep -qF "omasession restore" <<<"$(safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME")"
+}
+
+timer_enabled() { systemctl --user is-enabled --quiet omasession-snapshot.timer 2>/dev/null; }
+
+# 0.5.0 kept no setup.json, so the first `install --if-needed` after the
+# upgrade reads what that version left. Its install backed up autostart.lua
+# before adding the login line, and its uninstall kept that backup: a backup
+# with no line means the line was taken out, by uninstall when the units went
+# with it, by hand otherwise. Units on disk with the timer disabled mean the
+# user turned it off. Returns 1 when that was an uninstall.
+infer_setup_state() {
+    local bak=0 line=false timer=false
+    safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME.omasession.bak" >/dev/null && bak=1
+    if (( bak )) && ! login_line_present; then
+        if [[ ! -e "$UNIT_DIR/omasession-snapshot.timer" ]]; then
+            setup_state_set true false false
+            say "setup was undone by 'omasession uninstall' -- run 'omasession install' to set it up again"
+            return 1
+        fi
+        line=true
+    fi
+    [[ -e "$UNIT_DIR/omasession-snapshot.timer" ]] && ! timer_enabled && timer=true
+    setup_state_set false "$line" "$timer"
 }
 
 # Setup and its undo hold one lock. The plugin's service runs `install
@@ -1068,6 +1094,9 @@ cmd_install() {
     if (( if_needed )) && setup_declined; then
         say "setup was undone by 'omasession uninstall' -- run 'omasession install' to set it up again"
         return 0
+    fi
+    if (( if_needed )) && ! setup_state_present; then
+        infer_setup_state || return 0
     fi
 
     mkdir -p "$SESSION_DIR"
@@ -1099,10 +1128,14 @@ cmd_install() {
     fi
 
     write_units
-    local status=0
-    if (( ! if_needed || UNITS_CHANGED )) \
-        || ! systemctl --user is-enabled --quiet omasession-snapshot.timer 2>/dev/null \
-        || ! systemctl --user is-active --quiet omasession-snapshot.timer 2>/dev/null; then
+    # Once the timer has been set up, --if-needed leaves it alone while the
+    # user keeps it disabled: new units are loaded, not turned back on.
+    local status=0 had_timer enabled=0 timer_on=false
+    had_timer="$(setup_state_get timer)"
+    timer_enabled && enabled=1
+    if (( ! if_needed )) || [[ "$had_timer" != true ]] \
+        || { (( enabled )) && { (( UNITS_CHANGED )) \
+             || ! systemctl --user is-active --quiet omasession-snapshot.timer 2>/dev/null; }; }; then
         # Disable before enabling again: `enable` never removes a symlink left
         # by an older [Install] section, so upgrading from a version anchored
         # on a different target (graphical-session.target -- see write_units
@@ -1113,11 +1146,16 @@ cmd_install() {
         systemctl --user daemon-reload >/dev/null 2>&1 || true
         if systemctl --user enable --now omasession-snapshot.timer >/dev/null 2>&1; then
             say "snapshot timer enabled"
+            timer_on=true
         else
             err "could not enable the timer (no systemd user session?)"
             status=1
         fi
+    elif (( ! enabled )); then
+        (( UNITS_CHANGED )) && { systemctl --user daemon-reload >/dev/null 2>&1 || true; }
+        say "snapshot timer was disabled in systemd -- leaving it off ('omasession install' turns it back on)"
     fi
+    [[ "$had_timer" == true ]] && timer_on=true
 
     # A linha entra sempre; ligar e desligar é com o config, que o painel
     # escreve e que `restore --if-enabled` consulta no login. Só não volta,
@@ -1131,7 +1169,7 @@ cmd_install() {
     local has_line=false
     login_line_present && has_line=true
     [[ "$had_line" == true ]] && has_line=true
-    setup_state_set false "$has_line"
+    setup_state_set false "$has_line" "$timer_on"
 
     if (( if_needed )); then
         return "$status"
@@ -1180,7 +1218,7 @@ cmd_install() {
 cmd_uninstall() {
     setup_lock uninstall "$@"
     # Recorded first: the plugin's service must not set this up again.
-    setup_state_set true false
+    setup_state_set true false false
     systemctl --user disable --now omasession-snapshot.timer >/dev/null 2>&1 || true
     rm -f "$UNIT_DIR/omasession-snapshot.timer" "$UNIT_DIR/omasession-snapshot.service"
     systemctl --user daemon-reload 2>/dev/null || true
