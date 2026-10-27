@@ -4,7 +4,7 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
-## Unreleased
+## 0.5.1 — 2026-10-27
 
 - `omarchy plugin add ... --enable` is now the whole install. The plugin
   declares a service that the shell starts once, and it sets up the snapshot
