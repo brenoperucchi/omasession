@@ -377,6 +377,19 @@ class UserChoicesSurviveUpgrades(SetupEnv):
         self.assertTrue(self.timer_on())
         self.assertEqual(len(self.login_lines()), 1)
 
+    def test_a_plugin_added_again_turns_on_a_timer_left_off_before(self) -> None:
+        # Removed under 0.5.0 without uninstall, its timer disabled by hand,
+        # then added again: a new clone, so a first install.
+        self.run_cli("install")
+        self.user_disables_timer()
+        self.forget_setup_state()
+        clone = Path(self.tmp.name) / "plugins" / PLUGIN_ID
+        shutil.copytree(ROOT, clone, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git", "screenshots", "__pycache__"))
+        subprocess.run([str(clone / "bin" / "omasession"), "install", "--if-needed"],
+                       env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertTrue(self.timer_on())
+
     def test_upgrade_keeps_a_timer_turned_off_under_050(self) -> None:
         self.run_cli("install")
         self.user_disables_timer()

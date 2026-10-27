@@ -1057,29 +1057,30 @@ timer_enabled() { systemctl --user is-enabled --quiet omasession-snapshot.timer 
 # user turned it off (or a 0.5.0 install failed to enable it; nothing on disk
 # tells the two apart, and `omasession install` fixes the second).
 #
-# A plugin directory created after the backup is a plugin removed and added
-# again, which sets itself up like a first install. Without birth times to
-# compare, the backup counts. Returns 1 when that was an uninstall.
+# A plugin directory created after the backup or the timer unit is a plugin
+# removed and added again, which sets itself up like a first install. Without
+# birth times to compare, they count. Returns 1 when that was an uninstall.
+plugin_born_after() { # plugin_born_after <file>
+    local dir_born file_born re='^[1-9][0-9]*\.[0-9]{9}$'
+    dir_born="$(stat -L -c '%.9W' "$SELF" 2>/dev/null)" || return 1
+    file_born="$(stat -c '%.9W' "$1" 2>/dev/null)" || return 1
+    [[ "$dir_born" =~ $re && "$file_born" =~ $re ]] || return 1
+    (( 10#${dir_born/./} > 10#${file_born/./} ))
+}
+
 infer_setup_state() {
-    local bak=0 line=false timer=false dir_born bak_born
+    local bak=0 line=false timer=false unit="$UNIT_DIR/omasession-snapshot.timer"
     safe_read "$AUTOSTART_DIR" "$AUTOSTART_NAME.omasession.bak" >/dev/null && bak=1
-    if (( bak )); then
-        dir_born="$(stat -L -c '%.9W' "$SELF" 2>/dev/null)" || dir_born=0
-        bak_born="$(stat -c '%.9W' "$AUTOSTART.omasession.bak" 2>/dev/null)" || bak_born=0
-        if [[ "$dir_born" =~ ^[1-9][0-9]*\.[0-9]{9}$ && "$bak_born" =~ ^[1-9][0-9]*\.[0-9]{9}$ ]] \
-            && (( 10#${dir_born/./} > 10#${bak_born/./} )); then
-            bak=0
-        fi
-    fi
+    (( bak )) && plugin_born_after "$AUTOSTART.omasession.bak" && bak=0
     if (( bak )) && ! login_line_present; then
-        if [[ ! -e "$UNIT_DIR/omasession-snapshot.timer" ]]; then
+        if [[ ! -e "$unit" ]]; then
             setup_state_set true false false
             say "setup was undone by 'omasession uninstall' -- run 'omasession install' to set it up again"
             return 1
         fi
         line=true
     fi
-    [[ -e "$UNIT_DIR/omasession-snapshot.timer" ]] && ! timer_enabled && timer=true
+    [[ -e "$unit" ]] && ! plugin_born_after "$unit" && ! timer_enabled && timer=true
     setup_state_set false "$line" "$timer"
 }
 
