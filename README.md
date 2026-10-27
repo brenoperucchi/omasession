@@ -206,14 +206,14 @@ printf '%s\n' '{"RestoreOnStartup": 1, "PromotionalTabsEnabled": false, "Default
 On the first launch after every version update, Chrome shows onboarding pages
 instead of restoring the session, and drops the restore. Only a browser policy
 file fixes that, since Chrome ignores the same setting written by hand. You
-opt in and run it yourself, once. `omasession install` never writes it, and
-nothing in this plugin runs as root. Chromium doesn't need it.
+opt in and run it yourself, once. The plugin never writes it, and nothing
+in it runs as root. Chromium doesn't need it.
 
 For another Chromium-based browser, use its policy directory with the same
 file name and content: `/etc/chromium/policies/managed/`,
 `/etc/brave/policies/managed/`, `/etc/vivaldi/policies/managed/` or
-`/etc/opt/edge/policies/managed/`. `omasession install` and `uninstall`
-check all five. `install -D -T -m 644` creates the directory if needed and
+`/etc/opt/edge/policies/managed/`. `omasession uninstall`, and `omasession
+install` when you run it by hand, check all five. `install -D -T -m 644` creates the directory if needed and
 replaces the file at that exact name. The `-T` keeps it from copying *into*
 a directory, or a symlink to one, that sits at that name; without it, a
 symlink there would silently redirect the write. A symlink swapped into a
