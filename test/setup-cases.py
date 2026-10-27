@@ -66,7 +66,8 @@ class SetupEnv(unittest.TestCase):
         self.tmp.cleanup()
 
     def write_shell(self, config, raw: str | None = None) -> None:
-        path = self.config / "omarchy" / "shell.json"
+        # The shell reads $HOME/.config/omarchy whatever XDG_CONFIG_HOME says.
+        path = Path(self.env["HOME"]) / ".config" / "omarchy" / "shell.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(raw if raw is not None else json.dumps(config))
 
@@ -104,6 +105,18 @@ class EnabledCheck(SetupEnv):
         self.write_shell({"version": 1, "plugins": [{"id": PLUGIN_ID}]})
         self.assert_running()
 
+    def test_a_bare_string_in_plugins_is_disabled(self) -> None:
+        # The shell reads only `.id` of objects there; strings count in the bar.
+        self.write_shell({"version": 1, "plugins": [PLUGIN_ID]})
+        self.assert_paused()
+
+    def test_a_shell_config_under_xdg_config_home_is_not_the_shells(self) -> None:
+        stray = self.config / "omarchy" / "shell.json"
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_text(json.dumps(shell_config()))
+        (Path(self.env["HOME"]) / ".config" / "omarchy" / "shell.json").unlink()
+        self.assert_paused()
+
     def test_not_in_the_layout_is_disabled(self) -> None:
         self.write_shell({"version": 1, "bar": {"layout": {"right": [{"id": "x.other"}]}}})
         self.assert_paused()
@@ -115,7 +128,7 @@ class EnabledCheck(SetupEnv):
     def test_no_usable_shell_config_is_disabled(self) -> None:
         # The shell itself falls back to its defaults then, which never list a
         # third-party plugin.
-        (self.config / "omarchy" / "shell.json").unlink()
+        (Path(self.env["HOME"]) / ".config" / "omarchy" / "shell.json").unlink()
         self.assert_paused()
         self.write_shell(None, raw="{not json")
         self.assert_paused()
@@ -179,6 +192,29 @@ class InstallIfNeeded(SetupEnv):
         self.assertIn(f'o.launch_on_start("{other} restore --if-enabled")', lines[0])
         self.run_cli("uninstall")
         self.assertEqual(self.autostart.read_text(), USER_AUTOSTART)
+
+    def test_a_failed_rewrite_leaves_the_autostart_file_alone(self) -> None:
+        other = "/home/someone/Devs/omasession/bin/omasession"
+        original = (USER_AUTOSTART + "\n-- OmaSession: reopen the last session at login\n"
+                    f'o.launch_on_start("{other} restore --if-enabled")\n')
+        self.autostart.write_text(original)
+        # The CLI pins PATH, so the failing awk comes in as a function.
+        hook = Path(self.tmp.name) / "failing-awk.sh"
+        hook.write_text('awk() { if [[ -n "${OLD:-}" ]]; then echo "-- partial"; return 42; fi\n'
+                        '        command awk "$@"; }\n')
+        self.env["BASH_ENV"] = str(hook)
+        result = self.run_cli("install", "--if-needed")
+        self.assertEqual(self.autostart.read_text(), original, result.stdout + result.stderr)
+        self.assertNotIn("now checks that the CLI exists", result.stdout)
+
+    def test_a_shell_start_never_replaces_a_session_with_a_legacy_one(self) -> None:
+        legacy = Path(self.tmp.name) / ".local" / "share" / "hyprresume" / "sessions"
+        legacy.mkdir(parents=True)
+        (legacy / "last.toml").write_text("legacy\n")
+        (legacy / "last.titles.json").write_text("{}\n")
+        (self.sessions / "last.toml").write_text("current\n")
+        self.run_cli("install", "--if-needed")
+        self.assertEqual((self.sessions / "last.toml").read_text(), "current\n")
 
     def test_uninstall_round_trips_the_autostart_file(self) -> None:
         self.run_cli("install", "--if-needed")

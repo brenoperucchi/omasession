@@ -70,7 +70,8 @@ LOGIN_CLAIM_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omasession"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 # The shell's own config, read to know whether the plugin is enabled
 # (plugin_enabled). Omarchy runs no hook of a plugin on disable or remove.
-SHELL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy"
+# The shell reads $HOME/.config/omarchy whatever XDG_CONFIG_HOME says.
+SHELL_CONFIG_DIR="$HOME/.config/omarchy"
 PLUGIN_ID="brenoperucchi.omasession"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
 AUTOSTART_NAME="autostart.lua"
@@ -247,7 +248,7 @@ plugin_enabled() {
              or ([(.bar | obj | .layout | obj) as $l
                   | ($l.left, $l.center, $l.right) | arr | .[] | entry_id]
                  | index($id)) != null
-             or ([.plugins | arr | .[] | entry_id] | index($id)) != null)
+             or ([.plugins | arr | .[] | objects | .id] | index($id)) != null)
     ' >/dev/null 2>&1 <<<"$raw"
 }
 
@@ -316,10 +317,10 @@ cmd_restore() {
     fi
     local name="${1:-last}"
     hypr_env || die "no Hyprland instance -- nothing to restore into"
-    # The login restore runs once per Hyprland instance. More than one caller
-    # reaches it in the same login (the autostart.lua line, the plugin's own
-    # setup, a restarted shell), and a second restore would reshuffle a desktop
-    # already in use. The claim is taken under the lock below, so a restore
+    # The login restore runs once per Hyprland instance. More than one line in
+    # autostart.lua can reach it in the same login (an installed copy next to a
+    # development checkout, say), and a second restore would reshuffle a
+    # desktop already in use. The claim is taken under the lock below, so a restore
     # that never starts leaves it free; this early look only spares a later
     # caller the wait on that lock.
     local claim_name="login-restore.$HYPRLAND_INSTANCE_SIGNATURE"
@@ -848,7 +849,8 @@ guard_login_restore() { # guard_login_restore <autostart content>
     guarded="$(autostart_line "$dir")"
     local transformed
     transformed="$(printf '%s' "$content" \
-        | OLD="$line" NEW="$guarded" awk '$0 == ENVIRON["OLD"] { print ENVIRON["NEW"]; next } { print }'
+        | OLD="$line" NEW="$guarded" awk '$0 == ENVIRON["OLD"] { print ENVIRON["NEW"]; next } { print }' \
+        || exit "$?"
         printf X)" || die "could not update $AUTOSTART"
     transformed="${transformed%X}"
     # awk ends the last line with a newline even when the file did not.
@@ -909,7 +911,13 @@ _legacy_migration_complete() { # _legacy_migration_complete <name> <sidecar-de-o
     [[ -f "$SESSION_DIR/$1.titles.json" ]]
 }
 
-migrate_legacy_session() {
+migrate_legacy_session() { # migrate_legacy_session [--new-only]
+    # --new-only (every shell start, through `install --if-needed`) only brings
+    # over names this machine has no session for yet. Finishing a half-copied
+    # pair is left to a manual install: on a session of our own that lost its
+    # sidecar, it would put the older legacy toml over the current one.
+    local new_only=0
+    [[ "${1:-}" == "--new-only" ]] && new_only=1
     [[ -d "$LEGACY_SESSION_DIR" ]] || return 0
     # Temporários de uma migração anterior morta por SIGKILL no meio do cp --
     # achado da rodada 6. Seguro varrer sem checar idade nem /proc: só esta
@@ -927,6 +935,7 @@ migrate_legacy_session() {
         name="$(basename "$toml" .toml)"
         case "$name" in omasession.*|*.prev) continue ;; esac
         sidecar="$LEGACY_SESSION_DIR/$name.titles.json"
+        (( new_only )) && [[ -e "$SESSION_DIR/$name.toml" ]] && continue
         # Nunca sobrescreve uma sessão que o novo capturador já salvou por
         # completo, seja "last" ou um nome próprio -- achado da rodada 4.
         _legacy_migration_complete "$name" "$sidecar" && continue
@@ -946,7 +955,8 @@ migrate_legacy_session() {
         # nessa janela. Sem reconferir aqui, a migração sobrescreveria uma
         # sessão nova com a legada, o oposto do que a checagem existe pra
         # evitar.
-        if _legacy_migration_complete "$name" "$sidecar"; then
+        if _legacy_migration_complete "$name" "$sidecar" \
+            || { (( new_only )) && [[ -e "$SESSION_DIR/$name.toml" ]]; }; then
             exec 9>&-
             continue
         fi
@@ -1001,7 +1011,9 @@ migrate_legacy_session() {
 # removing the plugin and adding it again clones a new directory, which sets
 # itself up like any first install, while `omarchy plugin update` keeps the
 # directory and so keeps the refusal.
-plugin_dir_id() { stat -L -c '%d:%i' "$SELF" 2>/dev/null || printf 'unknown'; }
+# The birth time keeps a filesystem that reuses a freed inode from handing the
+# refusal on to a new clone.
+plugin_dir_id() { stat -L -c '%d:%i:%W' "$SELF" 2>/dev/null || printf 'unknown'; }
 
 setup_state_raw() {
     local raw
@@ -1059,7 +1071,7 @@ cmd_install() {
     fi
 
     mkdir -p "$SESSION_DIR"
-    migrate_legacy_session
+    if (( if_needed )); then migrate_legacy_session --new-only; else migrate_legacy_session; fi
     # rc, não só string vazia -- achado omasession-16 (rev-1): um config.json
     # de verdade, maior que o teto de 8 MiB, também lê como string vazia
     # (rc=1, recusado -- não rc=3, ausente), e a versão anterior escrevia os

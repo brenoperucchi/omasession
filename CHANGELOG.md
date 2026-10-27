@@ -21,9 +21,9 @@ request.
   `ConditionPathExists`, and the login line checks that the CLI exists. A
   line written by an earlier version gets that check in place, keeping the
   path it names.
-- The login restore runs once per Hyprland instance. A second caller in the
-  same login, such as the old login line together with the new setup, does
-  nothing.
+- The login restore runs once per Hyprland instance. A second login line in
+  autostart.lua, such as one for a development checkout next to the
+  installed plugin, does nothing.
 - The panel says when automatic save is off: the plugin is not enabled, or
   the snapshot timer is not running.
 

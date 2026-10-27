@@ -100,7 +100,7 @@ class LoginRestoreOnce(unittest.TestCase):
         }
         self.marker = self.runtime / "omasession" / f"login-restore.{SIG}"
         # The login restore runs only while the plugin is enabled (setup-cases.py).
-        shell = base / "config" / "omarchy" / "shell.json"
+        shell = base / ".config" / "omarchy" / "shell.json"
         shell.parent.mkdir(parents=True)
         shell.write_text('{"version": 1, "plugins": [{"id": "brenoperucchi.omasession"}]}\n')
 
