@@ -15,6 +15,8 @@
 #   omasession uninstall          undo install
 #   omasession config get <key>   read one config value (empty if unset)
 #   omasession config set <key> <value>   persist one config value
+#   omasession report [dir]      bundle the last restore's log, its session and
+#                                 the journal for a restore that went wrong
 #
 # Everything heavy lives here rather than in Panel.qml: a crash inside
 # quickshell takes down the bar, the dock and the menu at once, and restoring
@@ -381,6 +383,9 @@ cmd_restore() {
     # restoreOrder: put windows back in their saved slot order (replay.py).
     # auto (the default) does it only when the Lua config reports the order.
     restore_order="$(config_get restoreOrder "$DEFAULT_RESTORE_ORDER")"
+    local trigger=manual
+    (( login )) && trigger=login
+    OMASESSION_RESTORE_TRIGGER="$trigger" \
     OMASESSION_APP_RESTORE_GHOSTTY="$restore_ghostty" \
     OMASESSION_RESTORE_ORDER="$restore_order" \
         exec python3 "$LIB/replay.py" "$SESSION_DIR/$name.toml"
@@ -456,7 +461,7 @@ cmd_restore_app() {
     fi
     local restore_order
     restore_order="$(config_get restoreOrder "$DEFAULT_RESTORE_ORDER")"
-    exec env OMASESSION_APP_RESTORE_GHOSTTY=true \
+    exec env OMASESSION_RESTORE_TRIGGER=app OMASESSION_APP_RESTORE_GHOSTTY=true \
         OMASESSION_RESTORE_ORDER="$restore_order" \
         python3 "$LIB/replay.py" --app "$filter" \
         "$SESSION_DIR/last.toml"
@@ -1339,7 +1344,70 @@ cmd_config() {
     esac
 }
 
-usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# ── report ──────────────────────────────────────────────────────────────────
+# Everything needed to study a restore that went wrong, in one folder: the
+# restore's own log and the session it replayed (lib/restore_log.py keeps
+# both), the state files, and the journal of this boot and of the previous
+# one, whose end says how the machine went down. Window classes, folders and
+# window titles, nothing from inside the windows; it stays on this machine.
+# The last <n> lines of a journal query. `journalctl -g` exits 1 when nothing
+# matches, and under pipefail that would end the report right at the case it is
+# meant to explain (a boot that did not go down through the menu); in a report
+# "nothing matched" is a finding, so it is written down.
+journal_excerpt() {
+    local n="$1" lines
+    shift
+    lines="$(journalctl --no-pager -o short-iso "$@" 2>&1)" || true
+    if [[ -n "$lines" ]]; then
+        printf '%s\n' "$lines" | tail -n "$n"
+    else
+        echo "(no match)"
+    fi
+}
+
+cmd_report() {
+    local out="${1:-$STATE_DIR/reports/$(date +%Y%m%d-%H%M%S)}"
+    [[ -e "$out" ]] && die "$out already exists -- refusing to write into it"
+    mkdir -p -m 700 "$out" || die "cannot create $out"
+    local latest="" f
+    if [[ -d "$STATE_DIR/restores" ]]; then
+        # The log written last, not the last name: a `manual` and an `app`
+        # restore in the same second sort by trigger (lib/restore_log.py by_age).
+        latest="$(find "$STATE_DIR/restores" -maxdepth 1 -type f -name '*.log' -printf '%T@ %f\n' \
+            | LC_ALL=C sort -n | tail -n 1 | cut -d' ' -f2-)"
+    fi
+    if [[ -n "$latest" ]]; then
+        local stem="${latest%.log}"
+        for f in "$stem.log" "$stem.session.toml" "$stem.titles.json"; do
+            [[ -f "$STATE_DIR/restores/$f" ]] && cp -- "$STATE_DIR/restores/$f" "$out/"
+        done
+    elif [[ -f "$STATE_DIR/last-restore.log" ]]; then
+        cp -- "$STATE_DIR/last-restore.log" "$out/"
+    fi
+    for f in last-save.json setup.json browser-repair.json; do
+        [[ -f "$STATE_DIR/$f" ]] && cp -- "$STATE_DIR/$f" "$out/"
+    done
+    [[ -f "$CONFIG" ]] && cp -- "$CONFIG" "$out/config.json"
+    ls -l --time-style=full-iso "$STATE_DIR/restores" >"$out/restores.txt" 2>/dev/null || true
+    {
+        echo "== this boot: omasession"
+        journal_excerpt 400 --user -b -g 'omasession|OmaSession'
+        echo "== previous boot: omasession"
+        journal_excerpt 100 --user -b -1 -g 'omasession|OmaSession'
+        echo "== previous boot: how it went down"
+        journal_excerpt 5 --user -b -1 -g 'omarchy-system-(shutdown|reboot|logout)'
+        journal_excerpt 15 -b -1 -u systemd-logind
+    } >"$out/journal.txt"
+    chmod 600 "$out"/* 2>/dev/null || true
+    say "report written to $out"
+    if [[ -n "$latest" ]]; then
+        say "restore: $latest"
+    else
+        err "no restore log kept yet -- only restores from this version on are kept"
+    fi
+}
+
+usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
     save)      shift; cmd_save "$@" ;;
@@ -1353,6 +1421,7 @@ case "${1:-}" in
     install)   shift; cmd_install "$@" ;;
     uninstall) shift; cmd_uninstall "$@" ;;
     config)    shift; cmd_config "$@" ;;
+    report)    shift; cmd_report "$@" ;;
     -h|--help|help|"") usage ;;
     *) err "unknown command: $1"; usage; exit 1 ;;
 esac

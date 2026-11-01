@@ -234,7 +234,17 @@ $OMASESSION restore-browser google-chrome  # move open Chrome windows back to th
 $OMASESSION status --json     # what the panel reads
 $OMASESSION layout [name]     # a saved session as geometry, for the Layout tab
 $OMASESSION resolve           # the command each open window would resolve to
+$OMASESSION report [dir]      # gather the last restore's log when one went wrong
 ```
+
+Every restore leaves a log in `~/.local/state/omasession/restores/`, named after
+when it ran and what started it (`login`, `manual` or `app`), with a copy of the
+session it replayed. The newest 20 are kept, and `last-restore.log` is a copy of
+the latest. A login restore's log ends with how the previous boot went down, as
+the journal recorded it. When a restore comes back wrong, `omasession report`
+copies that log, the session, the state files and the matching journal lines
+into one folder. The folder holds window titles and folder names, so read it
+before you share it.
 
 ## Configure
 

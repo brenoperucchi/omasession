@@ -38,8 +38,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from browser_session import repair_sessions, session_window_count  # noqa: E402
+import restore_log  # noqa: E402
 from resolve import skip_env_wrapper  # noqa: E402
-from safe_fs import Refused, TooLarge, open_dir_chain, read_capped_path, write_bytes  # noqa: E402
+from safe_fs import read_capped_path  # noqa: E402
 from tiled_layout import restore_tiled  # noqa: E402
 
 SESSION = Path.home() / ".local/share/omasession/sessions/last.toml"
@@ -440,6 +441,16 @@ def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
     # The option goes BEFORE any `--`: hyprresume records terminals as
     # `foot -- btop`, and appending after the separator hands the flag to btop.
     cwd = spec.get("cwd")
+    detail = ""
+    if app in TERMINAL_CWD_FLAG:
+        # What the log needs to tell a bad save from a bad restore: the cwd
+        # the save recorded, whether it still exists, and whether a program
+        # was saved to run inside the terminal.
+        where = f"cwd {cwd}" if cwd else "no cwd saved"
+        if cwd and not os.path.isdir(cwd):
+            where += " (gone)"
+        program = cmd.partition(" -- ")[2].split(" ", 1)[0]
+        detail = f"  ({where}; {'runs ' + program if program else 'no program saved'})"
     if cwd and app in TERMINAL_CWD_FLAG and TERMINAL_CWD_FLAG[app] not in cmd:
         flag = f"{TERMINAL_CWD_FLAG[app]}={shlex.quote(cwd)}"
         head, sep, tail = cmd.partition(" -- ")
@@ -450,13 +461,13 @@ def restore(spec: dict, claimed: set[str], index: int, total: int) -> bool:
 
     win = find_new(known, WINDOW_TIMEOUT, app)
     if win is None:
-        print(f"[{index}/{total}] {app}: no window after {WINDOW_TIMEOUT:.0f}s")
+        print(f"[{index}/{total}] {app}: no window after {WINDOW_TIMEOUT:.0f}s{detail}")
         return False
 
     claimed.add(win["address"])
     spec["_restored_address"] = win["address"]
     place(win["address"], spec)
-    print(f"[{index}/{total}] {app}: restored → ws{ws}")
+    print(f"[{index}/{total}] {app}: restored → ws{ws}{detail}")
     return True
 
 
@@ -864,6 +875,12 @@ def restore_browser(app: str, specs: list[dict], titles: list[dict],
                     else last_active_profiles(app)) or ["Default"]
         print(f"[browser] {app}: {want} window(s) in {len(profiles)} profile(s) "
               f"-- requesting their saved sessions")
+        root = profile_root(app)
+        for profile in profiles:
+            for line in restore_log.profile_lines(root / profile / "Preferences",
+                                                  root / profile / "Sessions",
+                                                  session_window_count):
+                print(f"  {profile}: {line}")
         armed = [p for p in profiles if arm_browser_profile(app, p)]
         if not armed:
             print(f"  ! no profile for {app}, falling back to per-window launch")
@@ -1126,6 +1143,18 @@ def main() -> int:
         return 1
 
     windows, titles, sidecar = load_pair(path)
+    # load_pair may fall back to the previous generation; the log describes and
+    # keeps the pair that was actually replayed, never the one it rejected.
+    prev_path = Path(str(path).removesuffix(".toml") + ".prev.toml")
+    used = prev_path if sidecar == sidecar_for(prev_path) else path
+    state_dir = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "omasession"
+    for line in restore_log.context_lines(restore_log.trigger_from_env(), used, windows,
+                                          state_dir, _log.name if _log else None,
+                                          asked=path):
+        print(line)
+    if _log:
+        _log.keep_session(used, sidecar if titles else None)
+    print()
     if not windows:
         print("nothing to restore", file=sys.stderr)
         return 1
@@ -1216,34 +1245,16 @@ def main() -> int:
     return 0 if ok == len(windows) and not layout.failed else 2
 
 
+_log: restore_log.RestoreLog | None = None
+
+
 def run_logged() -> int:
     """Persist restore diagnostics without making logging a restore failure."""
+    global _log
     state_dir = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "omasession"
-    log_fd: int | None = None
-    log_failed = False
-    real_stderr = sys.stderr
+    _log = restore_log.RestoreLog(state_dir, restore_log.trigger_from_env())
     chunks = [time.strftime("Restore started %Y-%m-%d %H:%M:%S %Z\n")]
-
-    try:
-        log_fd = open_dir_chain(str(state_dir), create=True)
-    except (OSError, Refused, TooLarge) as exc:
-        real_stderr.write(f"[omasession] restore log unavailable: {exc}\n")
-        real_stderr.flush()
-
-    def publish() -> None:
-        nonlocal log_fd, log_failed
-        if log_fd is None or log_failed:
-            return
-        try:
-            write_bytes(log_fd, "last-restore.log", "".join(chunks).encode(), mode=0o600)
-        except (OSError, Refused, TooLarge) as exc:
-            log_failed = True
-            os.close(log_fd)
-            log_fd = None
-            real_stderr.write(f"[omasession] restore log disabled: {exc}\n")
-            real_stderr.flush()
-
-    publish()
+    _log.publish("".join(chunks))
 
     class Tee:
         def __init__(self, stream):
@@ -1254,7 +1265,7 @@ def run_logged() -> int:
             self.stream.flush()
             chunks.append(text)
             if "\n" in text:
-                publish()
+                _log.publish("".join(chunks))
             return len(text)
 
         def flush(self):
@@ -1263,14 +1274,21 @@ def run_logged() -> int:
     try:
         with contextlib.redirect_stdout(Tee(sys.stdout)), contextlib.redirect_stderr(Tee(sys.stderr)):
             try:
-                return main()
+                rc = main()
             except Exception:
                 traceback.print_exc()
                 return 1
+            # After the windows are placed, and only when the restore ended on
+            # its own: a SIGTERM (logout, shutdown) unwinds past this, so a
+            # stopping session never waits on the journal.
+            if _log.trigger == "login":
+                print()
+                for line in restore_log.previous_boot_lines():
+                    print(line)
+            return rc
     finally:
-        publish()
-        if log_fd is not None:
-            os.close(log_fd)
+        _log.publish("".join(chunks))
+        _log.close()
 
 
 def exit_on_signal(signum, _frame) -> None:

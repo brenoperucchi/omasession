@@ -4,6 +4,22 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
+## Unreleased
+
+- Each restore keeps its own log in `~/.local/state/omasession/restores/`
+  instead of overwriting `last-restore.log`, so a manual restore no longer
+  erases what the login restore did. The log records what started the restore,
+  the session it replayed (a copy is kept next to it), the last save, Chrome's
+  profile state before the restore touched it, and the folder and program saved
+  for each terminal it opened. A login restore also records how the previous
+  boot ended. The newest 20 are kept, and `last-restore.log` is now a copy of
+  the latest one.
+- `omasession report [dir]` gathers the latest restore log, its session, the
+  state files and the journal lines from this boot and the previous one into a
+  single folder.
+- `omasession help` lists every command again. `uninstall` and `config` had
+  been cut off.
+
 ## 0.5.1 — 2026-10-27
 
 - `omarchy plugin add ... --enable` is now the whole install. The plugin
