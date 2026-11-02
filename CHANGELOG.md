@@ -4,7 +4,7 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
-## Unreleased
+## 0.6.0 — 2026-11-02
 
 - Each restore keeps its own log in `~/.local/state/omasession/restores/`
   instead of overwriting `last-restore.log`, so a manual restore no longer
