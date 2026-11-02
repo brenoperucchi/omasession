@@ -126,13 +126,8 @@ until the next restore puts them back.
 ## The panel
 
 The bar widget shows what was last captured and whether all of it can come
-back, with **Save now** and **Restore session**. Below that:
+back, with **Save now** and **Restore session**. Below that are five tabs:
 
-- **Restore App Windows** has a card for Google Chrome and one for Ghostty.
-  The Chrome button asks Chrome to restore its own windows and tabs and then
-  places them. The Ghostty button reopens only the Ghostty windows. Each
-  card's toggle stays visible when the app is closed: Chrome's controls
-  `browserRepairChrome`, and Ghostty's controls `appRestoreGhostty`.
 - **Windows** lists every saved window under its monitor and workspace, with
   its directory or program, and flags the ones that can't come back.
 - **Layout** draws each workspace to scale from the saved monitor geometry
@@ -141,10 +136,31 @@ back, with **Save now** and **Restore session**. Below that:
 - **Saved** lists your named sessions and the history, each with Preview
   (shown in the Layout tab) and Restore, plus **Save as** to name the current
   arrangement.
+- **Apps** has a card for Google Chrome and one for Ghostty. The Chrome
+  button asks Chrome to restore its own windows and tabs and then places
+  them. The Ghostty button reopens only the Ghostty windows. Each card's
+  toggle stays visible when the app is closed: Chrome's controls
+  `browserRepairChrome`, and Ghostty's controls `appRestoreGhostty`.
+- **Log** lists the restores that ran, newest first, with how many windows
+  each one placed. The open one shows the lines worth reading first: windows
+  that never appeared, Chrome's profile state before the restore, terminals
+  with no program saved, and how the previous boot went down. When the latest
+  restore had problems, the tab gets a dot and the header says so. **Open
+  log** shows the whole log. **Report a problem** gathers it with
+  `omasession report`, opens the folder, and opens a new GitHub issue with the
+  outcome filled in. Nothing is sent until you submit the issue yourself.
+
+A window counts as placed even when it comes back empty, such as a Chrome
+window without its tabs, so every restore in the Log tab can be reported, not
+only the ones marked with problems.
 
 | Layout | Saved |
 |---|---|
 | ![Layout tab](screenshots/panel-layout.png) | ![Saved tab](screenshots/panel-saved.png) |
+
+| Apps | Log |
+|---|---|
+| ![Apps tab](screenshots/panel-apps.png) | ![Log tab after a login restore with problems](screenshots/panel-log.png) |
 
 ![Three monitors, six windows, grouped by monitor](screenshots/panel-multimonitor.png)
 
@@ -234,7 +250,9 @@ $OMASESSION restore-browser google-chrome  # move open Chrome windows back to th
 $OMASESSION status --json     # what the panel reads
 $OMASESSION layout [name]     # a saved session as geometry, for the Layout tab
 $OMASESSION resolve           # the command each open window would resolve to
+$OMASESSION restores          # the kept restore logs and how each one went
 $OMASESSION report [dir]      # gather the last restore's log when one went wrong
+$OMASESSION report --restore <name> --issue  # the same for one restore, plus a bug report
 ```
 
 Every restore leaves a log in `~/.local/state/omasession/restores/`, named after
@@ -244,7 +262,10 @@ the latest. A login restore's log ends with how the previous boot went down, as
 the journal recorded it. When a restore comes back wrong, `omasession report`
 copies that log, the session, the state files and the matching journal lines
 into one folder. The folder holds window titles and folder names, so read it
-before you share it.
+before you share it. With `--issue` it also writes `issue.md` there and prints
+a link to a new GitHub issue that carries the restore's outcome and its
+flagged lines, with window titles left out and your home folder written as
+`~`.
 
 ## Configure
 

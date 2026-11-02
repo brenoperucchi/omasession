@@ -30,16 +30,16 @@ de produzir, mantida em sincronia manual com `lib/effective.py` +
 
 ## Composição atual do painel
 
-Desde 2026-09-17 o painel separa os dois fluxos que o usuário pode restaurar,
-sem criar abas internas:
+Desde 2026-11-02 tudo o que vem depois do resumo fica em abas:
 
 1. O cabeçalho mantém `OmaSession`, o estado “restores on next login” e o
-   toggle.
+   toggle. Quando o último restore teve problema, o estado vira “last restore
+   had problems”.
 2. Um único corpo rolável mostra o resumo do snapshot (`All N come back`, a
    régua, workspaces/monitores e horário), `Save now`/`Restore session`, os
-   avisos, a seção **Restore App Windows** e a seção **Restore Windows on
-   Restart**.
-3. A seção de aplicativos tem dois cards independentes, **Google Chrome** e
+   avisos e uma linha de abas: **Windows**, **Layout**, **Saved**, **Apps** e
+   **Log**.
+3. A aba **Apps** tem dois cards independentes, **Google Chrome** e
    **Ghostty**, cada um com um toggle compacto à esquerda. O Chrome grava
    browserRepairChrome e mantém a ação manual de mover janelas abertas; o
    Ghostty grava appRestoreGhostty e chama restore-app ghostty, adotando uma
@@ -47,7 +47,14 @@ sem criar abas internas:
    está instalado e se há uma janela no snapshot; o card continua visível
    quando o app está fechado e fica desativado se o executável não existir. O
    resultado da última ação aparece logo abaixo.
-4. A cadência (`Snapshot every Ns`) fica no rodapé fixo e compacto.
+4. A aba **Log** lê `omasession restores --json` e lista os restores
+   guardados, do mais novo para o mais antigo, com o placar de cada um. O
+   aberto mostra os problemas em vermelho e o contexto em cinza, com **Open
+   log** e **Report a problem**. Este chama `omasession report --restore
+   <nome> --issue --json` e abre a pasta e o link da issue com `xdg-open`, por
+   `Util.execArgv`, sem passar o caminho por um shell. A aba ganha um ponto
+   quando o último restore teve problema.
+5. A cadência (`Snapshot every Ns`) fica no rodapé fixo e compacto.
 
 O corpo único evita scrolls aninhados: em telas pequenas, resumo, ação do
 Chrome, inventário e mensagens rolam juntos; cabeçalho e rodapé continuam
@@ -209,7 +216,7 @@ Um `Process` (`Quickshell.Io`) por operação:
   proíbe o QML de tocar em arquivo nenhum diretamente — inclusive
   `config.json`.
 - `browserRestoreProc` chama `omasession restore-app google-chrome` pelo
-  botão identificado **Google Chrome** na seção “Restore App Windows”. O
+  botão identificado **Google Chrome** na aba **Apps**. O
   filtro app-only deixa o próprio Chrome restaurar as abas antes de o replay
   mover as janelas para seus workspaces salvos. O toggle compacto da mesma linha grava `browserRepairChrome`; ligado, ele permite a
   correção automática após um restart do Chrome, e desligado deixa apenas a

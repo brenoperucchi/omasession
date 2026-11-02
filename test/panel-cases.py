@@ -66,5 +66,46 @@ class PanelCases(unittest.TestCase):
             self.assertIn("!root.cliMissing", expression, toggle_id)
 
 
+    def test_apps_and_log_are_tabs_like_the_others(self) -> None:
+        source = PANEL.read_text(encoding="utf-8")
+        tabs = re.search(r"id:\s*viewTabs\b(?P<body>.*?)\n\s*\}\n", source, re.DOTALL)
+        self.assertIsNotNone(tabs)
+        values = re.findall(r'value:\s*"(\w+)"', tabs.group("body"))
+        self.assertEqual(values, ["windows", "layout", "saved", "apps", "log"])
+        # The app card shows only on its own tab, not above every view.
+        card = re.search(r"Rectangle \{\s*visible:(?P<cond>[^\n]*)\n(?:(?!Rectangle \{).)*?id:\s*appsCol\b",
+                         source, re.DOTALL)
+        self.assertIsNotNone(card)
+        self.assertIn('root.view === "apps"', card.group("cond"))
+        self.assertNotIn("Restore Windows on Restart", source)
+
+    def test_a_report_never_goes_through_a_shell_string(self) -> None:
+        # A restore name and the report folder come from files on disk; they
+        # reach the CLI and xdg-open as argv, never re-read by bash.
+        source = PANEL.read_text(encoding="utf-8")
+        self.assertRegex(source, r'reportProc\.command = \[root\.cliPath, "report", "--restore", name,')
+        self.assertIn('Util.execArgv(["xdg-open", path])', source)
+        self.assertNotIn("execDetached", source)
+        self.assertNotIn("openUrlExternally", source)
+
+    def test_the_log_tab_reads_the_cli_not_the_files(self) -> None:
+        source = PANEL.read_text(encoding="utf-8")
+        self.assertIn('command: [root.cliPath, "restores", "--json"]', source)
+        self.assertNotIn("FileView", source)
+
+    def test_the_restore_list_loads_only_while_the_panel_is_open(self) -> None:
+        # Review omasession-50: the 30 s timer ran `restores --json` all day
+        # for a dot and a header nobody could see with the panel closed.
+        source = PANEL.read_text(encoding="utf-8")
+        refresh = re.search(r"function refresh\(\) \{(?P<body>.*?)\n  \}", source, re.DOTALL)
+        self.assertIsNotNone(refresh)
+        self.assertIn("if (opened) loadRestores()", refresh.group("body"))
+        self.assertRegex(source, r"readonly property bool attention:\s*guardRefused\n")
+
+    def test_login_restore_off_outranks_a_bad_last_restore(self) -> None:
+        source = PANEL.read_text(encoding="utf-8")
+        self.assertLess(source.index('!root.restoreOnLogin ? "RESTORE ON LOGIN IS OFF"'),
+                        source.index('root.lastRestoreBad ? "LAST RESTORE HAD PROBLEMS"'))
+
 if __name__ == "__main__":
     unittest.main()

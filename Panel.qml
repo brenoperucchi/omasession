@@ -41,6 +41,7 @@ Panel {
   //   healthy    a recent snapshot, nothing wrong
   //   refused    the guard blocked a save (exit 3) -- the case that used to
   //              destroy the session silently, so it must be visible
+  //   problem    healthy, after a login restore that left windows behind
   property bool mockMode: false
   property string scenario: "healthy"
 
@@ -48,23 +49,26 @@ Panel {
     Quickshell.env("HOME") + "/.config/omarchy/plugins/brenoperucchi.omasession/bin/omasession"
   readonly property string pluginVersion: "0.5.1"
 
-  readonly property var mock: ({
-    "healthy": {
-      "windows": 4, "workspaces": 4, "agoSec": 42, "refused": false, "detail": "",
-      "intervalSec": 30, "restoreOnLogin": true, "browserRepair": true,
-      "browserRepairChrome": true,
-      "appRestoreGhostty": true,
-      "appAvailability": {
-        "googleChrome": { "installed": true, "captured": false },
-        "ghostty": { "installed": true, "captured": false }
-      },
-      "captured": [
-        { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "detail": "~/Devs/my project", "warn": "", "resolvable": true },
-        { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "detail": "", "warn": "", "resolvable": true },
-        { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "detail": "", "warn": "", "resolvable": true },
-        { "ws": 4, "mon": "HDMI-A-1", "cls": "chromium",             "app": "Chromium", "title": "Hyprland Wiki",  "detail": "tabs restored by the browser", "warn": "", "resolvable": true }
-      ]
+  readonly property var mockHealthy: ({
+    "windows": 4, "workspaces": 4, "agoSec": 42, "refused": false, "detail": "",
+    "intervalSec": 30, "restoreOnLogin": true, "browserRepair": true,
+    "browserRepairChrome": true,
+    "appRestoreGhostty": true,
+    "appAvailability": {
+      "googleChrome": { "installed": true, "captured": false },
+      "ghostty": { "installed": true, "captured": false }
     },
+    "captured": [
+      { "ws": 1, "mon": "DP-1", "cls": "foot",                 "app": "Foot",     "title": "~/Devs/my project",  "detail": "~/Devs/my project", "warn": "", "resolvable": true },
+      { "ws": 2, "mon": "DP-1", "cls": "org.gnome.Nautilus",   "app": "Files",    "title": "Home",               "detail": "", "warn": "", "resolvable": true },
+      { "ws": 3, "mon": "HDMI-A-1", "cls": "md.obsidian.Obsidian", "app": "Obsidian", "title": "Vault",          "detail": "", "warn": "", "resolvable": true },
+      { "ws": 4, "mon": "HDMI-A-1", "cls": "chromium",             "app": "Chromium", "title": "Hyprland Wiki",  "detail": "tabs restored by the browser", "warn": "", "resolvable": true }
+    ]
+  })
+  readonly property var mock: ({
+    "healthy": mockHealthy,
+    // the healthy save, after a login restore that went wrong (Log tab)
+    "problem": mockHealthy,
     "refused": {
       "windows": 4, "workspaces": 4, "agoSec": 214, "refused": true,
       "detail": "partial save blocked: 1 window written, 4 on screen",
@@ -104,6 +108,9 @@ Panel {
     // The tab that is showing reloads with the status, not only when picked.
     if (view === "saved") loadSessions()
     if (view === "layout") loadLayout(layoutName)
+    // Only while someone can see it: the dot and the header live in the
+    // panel, and opening it refreshes. The bar icon stays on guardRefused.
+    if (opened) loadRestores()
     // A writer can finish while status --json is still being read. Queue that
     // refresh instead of dropping it, so the final toggle state is read back.
     if (checking) {
@@ -177,6 +184,115 @@ Panel {
   property var layoutData: null        // layout <name>: monitors, workspaces, windows
   property string layoutWorkspace: ""
   property string savedMessage: ""
+
+  // ── restore logs and bug reports ────────────────────────────────────────
+  // `restores --json`: every kept restore, newest first, with its outcome and
+  // the lines worth reading first. `placed` counts windows put somewhere; it
+  // cannot see a Chrome window that came back without its tabs, so every
+  // restore can be reported, not only the ones that failed.
+  property var realRestores: []
+  property string logSelected: ""      // the restore whose lines are open
+  property string reportMessage: ""
+  property bool reportFailed: false
+  readonly property var mockRestores: [
+    { "name": "20261101-151633-login", "trigger": "login", "result": "partial",
+      "started": 1793556993, "placed": 5, "total": 7, "log": "",
+      "problems": ["[6/7] foot: no window after 30s  (no cwd saved; runs btop)",
+                   "! google-chrome reopened nothing"],
+      "notes": ["Default: exit_type=Crashed exited_cleanly=False",
+                "Default: windows in the newest session: 1",
+                "terminals: 3, 2 with no program saved, 0 whose folder is gone, 1 with no folder saved",
+                "omarchy menu: 2026-10-31T13:50:07 omarchy-system-shutdown --inhibit"] },
+    { "name": "20261031-153200-manual", "trigger": "manual", "result": "ok",
+      "started": 1793471520, "placed": 7, "total": 7, "log": "", "problems": [], "notes": [] }
+  ]
+  readonly property var restores: !mockMode ? realRestores
+                                  : scenario === "problem" ? mockRestores
+                                  : mockRestores.slice(1)
+  readonly property var lastRestore: restores.length > 0 ? restores[0] : null
+  readonly property bool lastRestoreBad: restoreBad(lastRestore)
+
+  function restoreBad(r) {
+    if (!r) return false
+    return ["partial", "failed", "interrupted"].indexOf(r.result) !== -1
+           || (r.problems && r.problems.length > 0)
+  }
+  function restoreWhen(r) {
+    if (!r || !r.started) return "?"
+    return new Date(r.started * 1000).toLocaleString(Qt.locale(), "ddd MMM d, h:mm AP")
+  }
+  function restoreOutcome(r) {
+    var words = { "ok": "all placed", "partial": "some did not come back", "failed": "failed",
+                  "interrupted": "interrupted", "nothing": "nothing to restore",
+                  "unfinished": "running, or stopped before it finished" }
+    var parts = []
+    if (r.placed !== undefined && r.placed !== null && r.total)
+      parts.push(r.placed + "/" + r.total + " placed")
+    if (r.result !== "ok" || parts.length === 0) parts.push(words[r.result] || String(r.result))
+    if (r.problems && r.problems.length > 0)
+      parts.push(r.problems.length + (r.problems.length === 1 ? " problem" : " problems"))
+    return parts.join(" · ")
+  }
+  function loadRestores() {
+    if (mockMode || restoresProc.running) return
+    restoresProc.running = true
+  }
+  function reportRestore(name) {
+    if (mockMode || reportProc.running) return
+    reportFailed = false
+    reportMessage = "Gathering the log, the session and the journal…"
+    reportProc.command = [root.cliPath, "report", "--restore", name, "--issue", "--json"]
+    reportProc.running = true
+  }
+  // xdg-open through Omarchy's argv helper, so a path is never re-read by a shell.
+  function openPath(path) {
+    if (path) Util.execArgv(["xdg-open", path])
+  }
+
+  Process {
+    id: restoresProc
+    command: [root.cliPath, "restores", "--json"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var data = null
+        try { data = JSON.parse(String(this.text).trim()) } catch (e) {}
+        root.realRestores = (data && Array.isArray(data.restores)) ? data.restores : []
+      }
+    }
+  }
+
+  Process {
+    id: reportProc
+    command: [root.cliPath, "report", "--json"]
+    stdout: StdioCollector {
+      id: reportStdout
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: reportStderr
+      waitForEnd: true
+    }
+    onExited: function(code) {
+      var answer = null
+      try { answer = JSON.parse(String(reportStdout.text || "").trim()) } catch (e) {}
+      if (code !== 0 || !answer || !answer.dir) {
+        var lines = String(reportStderr.text || "").trim().split("\n")
+        root.reportFailed = true
+        root.reportMessage = lines[lines.length - 1] || ("report failed (exit " + code + ")")
+        return
+      }
+      root.openPath(answer.dir)
+      if (!answer.url) {
+        root.reportFailed = answer.issueError !== undefined && answer.issueError !== ""
+        root.reportMessage = "Report written to " + answer.dir
+                             + (root.reportFailed ? ", but the issue link failed: " + answer.issueError : "")
+      } else {
+        root.openPath(answer.url)
+        root.reportMessage = "The issue opened in your browser and the files in "
+                             + answer.dir + ". Read both before you send it."
+      }
+    }
+  }
 
   function loadSessions() {
     if (mockMode || listProc.running) return
@@ -281,6 +397,7 @@ Panel {
   onViewChanged: {
     if (view === "saved") loadSessions()
     if (view === "layout" && layoutData === null) loadLayout(layoutName)
+    if (view === "log") loadRestores()
   }
 
   Process {
@@ -608,8 +725,11 @@ Panel {
                 width: parent.width
                 text: root.cliMissing     ? "CLI NOT INSTALLED"
                     : !root.status        ? "NOTHING SAVED YET"
-                    : root.restoreOnLogin ? "RESTORES ON NEXT LOGIN"
-                                          : "RESTORE ON LOGIN IS OFF"
+                    // Off first: it decides the next boot, and the Log tab's
+                    // dot still marks a restore that had problems.
+                    : !root.restoreOnLogin ? "RESTORE ON LOGIN IS OFF"
+                    : root.lastRestoreBad ? "LAST RESTORE HAD PROBLEMS"
+                                          : "RESTORES ON NEXT LOGIN"
                 color: root.dim
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
@@ -843,9 +963,29 @@ Panel {
               }
             }
 
-            // ── app restoration ────────────────────────────────────────────
-            Rectangle {
+            // ── views ─────────────────────────────────────────────────────
+            // One row of tabs under the summary: what was saved (Windows,
+            // Layout, Saved), one app at a time (Apps), and what the restores
+            // actually did (Log). The dot on Log is the last restore's problems.
+            ButtonGroup {
+              id: viewTabs
               visible: root.mockMode || !root.cliMissing
+              options: [
+                { value: "windows", label: "Windows" },
+                { value: "layout", label: "Layout" },
+                { value: "saved", label: "Saved" },
+                { value: "apps", label: "Apps" },
+                { value: "log", label: root.lastRestoreBad ? "Log •" : "Log" }
+              ]
+              value: root.view
+              foreground: root.fg
+              fontSize: Style.font.caption
+              onChanged: function(v) { root.view = v }
+            }
+
+            // ── Apps: restore one app from the saved session ────────────────
+            Rectangle {
+              visible: (root.mockMode || !root.cliMissing) && root.view === "apps"
               width: parent.width
               height: appsCol.implicitHeight + Style.space(18)
               radius: Style.space(4)
@@ -863,7 +1003,9 @@ Panel {
 
                 Text {
                   textFormat: Text.PlainText
-                  text: "Restore App Windows"
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "Reopen one app's windows from the saved session, or let it come back on its own after a restart."
                   color: root.fg
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
@@ -1064,29 +1206,6 @@ Panel {
               }
             }
 
-            // ── restart restoration ────────────────────────────────────────
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              text: "Restore Windows on Restart"
-              color: root.fg
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-
-            ButtonGroup {
-              id: viewTabs
-              visible: root.mockMode || !root.cliMissing
-              options: [
-                { value: "windows", label: "Windows" },
-                { value: "layout", label: "Layout" },
-                { value: "saved", label: "Saved" }
-              ]
-              value: root.view
-              foreground: root.fg
-              fontSize: Style.font.caption
-              onChanged: function(v) { root.view = v }
-            }
 
             // ── Layout: the screens to scale, one workspace at a time ─────────
             Column {
@@ -1340,6 +1459,135 @@ Panel {
                           root.savedMessage = "Restoring \"" + modelData.name + "\"…"
                           restoreNamedProc.running = true
                         }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // ── Log: what each restore did, and a way to report it ──────────
+            Column {
+              id: logView
+              visible: root.view === "log"
+              width: bodyScroll.width
+              spacing: Style.spacing.sm
+
+              Text {
+                textFormat: Text.PlainText
+                visible: root.restores.length === 0
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: restoresProc.running ? "Loading…"
+                      : "No restore logged yet. Every restore from now on, at login or from here, leaves its log in this list."
+                color: root.dim
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                visible: root.reportMessage !== ""
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: root.reportMessage
+                color: root.reportFailed ? Color.urgent : root.dim
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              Repeater {
+                model: root.restores
+                Rectangle {
+                  id: restoreRow
+                  readonly property bool open: root.logSelected !== ""
+                                               ? root.logSelected === modelData.name
+                                               : index === 0
+                  readonly property bool bad: root.restoreBad(modelData)
+                  width: logView.width
+                  height: restoreCol.implicitHeight + Style.space(12)
+                  radius: Style.space(3)
+                  color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, open ? 0.07 : 0.04)
+                  border.width: open ? 1 : 0
+                  border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.14)
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.logSelected = restoreRow.open ? "-" : modelData.name
+                  }
+
+                  Column {
+                    id: restoreCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.margins: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.spacing.xs
+
+                    Text {
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      elide: Text.ElideRight
+                      text: root.restoreWhen(modelData) + " · " + modelData.trigger
+                      color: root.fg
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      wrapMode: Text.WordWrap
+                      text: root.restoreOutcome(modelData)
+                      color: restoreRow.bad ? Color.urgent : root.dim
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    // The flagged lines, then the context: Chrome's profile
+                    // before the restore, terminals with nothing to run, how
+                    // the previous boot went down.
+                    Repeater {
+                      model: restoreRow.open ? (modelData.problems || []) : []
+                      Text {
+                        textFormat: Text.PlainText
+                        width: restoreCol.width
+                        wrapMode: Text.Wrap
+                        text: modelData
+                        color: Color.urgent
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+                    Repeater {
+                      model: restoreRow.open ? (modelData.notes || []) : []
+                      Text {
+                        textFormat: Text.PlainText
+                        width: restoreCol.width
+                        wrapMode: Text.Wrap
+                        text: modelData
+                        color: root.dim
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    Row {
+                      visible: restoreRow.open
+                      spacing: Style.spacing.sm
+                      Button {
+                        text: "Open log"
+                        bordered: true
+                        focusable: true
+                        enabled: !root.mockMode && modelData.log !== ""
+                        onClicked: root.openPath(modelData.log)
+                      }
+                      Button {
+                        text: reportProc.running ? "Gathering…" : "Report a problem"
+                        bordered: true
+                        focusable: true
+                        enabled: !root.mockMode && !reportProc.running
+                        onClicked: root.reportRestore(modelData.name)
                       }
                     }
                   }

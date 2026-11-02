@@ -17,6 +17,17 @@ request.
 - `omasession report [dir]` gathers the latest restore log, its session, the
   state files and the journal lines from this boot and the previous one into a
   single folder.
+- The panel's Chrome and Ghostty cards moved to an **Apps** tab next to
+  Windows, Layout and Saved, so the panel is shorter and the tabs sit right
+  under the summary.
+- A new **Log** tab lists the kept restores with how many windows each one
+  placed and the lines worth reading first. When the latest restore had
+  problems, the tab gets a dot and the header says so. From there you can open
+  the full log or report a problem, which gathers the report and opens a
+  GitHub issue with the outcome filled in for you to review and send.
+- `omasession restores [--json]` lists the kept restores. Each restore also
+  writes a short `result.json` next to its log. `omasession report` takes
+  `--restore <name>` to pick one and `--issue` to prepare the bug report.
 - `omasession help` lists every command again. `uninstall` and `config` had
   been cut off.
 

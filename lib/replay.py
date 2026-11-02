@@ -1271,13 +1271,15 @@ def run_logged() -> int:
         def flush(self):
             self.stream.flush()
 
+    rc = None  # stays None when a signal stops the restore: "interrupted"
     try:
         with contextlib.redirect_stdout(Tee(sys.stdout)), contextlib.redirect_stderr(Tee(sys.stderr)):
             try:
                 rc = main()
             except Exception:
                 traceback.print_exc()
-                return 1
+                rc = 1
+                return rc
             # After the windows are placed, and only when the restore ended on
             # its own: a SIGTERM (logout, shutdown) unwinds past this, so a
             # stopping session never waits on the journal.
@@ -1288,6 +1290,7 @@ def run_logged() -> int:
             return rc
     finally:
         _log.publish("".join(chunks))
+        _log.finish(rc, "".join(chunks))
         _log.close()
 
 

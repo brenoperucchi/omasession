@@ -15,8 +15,10 @@
 #   omasession uninstall          undo install
 #   omasession config get <key>   read one config value (empty if unset)
 #   omasession config set <key> <value>   persist one config value
-#   omasession report [dir]      bundle the last restore's log, its session and
-#                                 the journal for a restore that went wrong
+#   omasession restores [--json]  the kept restore logs, newest first, with how each went
+#   omasession report [--restore <name>] [--issue] [--json] [dir]
+#                                 bundle a restore's log, its session and the
+#                                 journal; --issue also prepares a bug report
 #
 # Everything heavy lives here rather than in Panel.qml: a crash inside
 # quickshell takes down the bar, the dock and the menu at once, and restoring
@@ -1365,12 +1367,38 @@ journal_excerpt() {
     fi
 }
 
+cmd_restores() {
+    local json=()
+    case "${1:-}" in
+        --json) json=(--json) ;;
+        "") ;;
+        *) die "usage: omasession restores [--json]" ;;
+    esac
+    python3 "$LIB/restore_log.py" list "$STATE_DIR" "${json[@]}"
+}
+
 cmd_report() {
-    local out="${1:-$STATE_DIR/reports/$(date +%Y%m%d-%H%M%S)}"
+    local usage="usage: omasession report [--restore <name>] [--issue] [--json] [dir]"
+    local out="" latest="" issue=0 json=0 f
+    while (( $# )); do
+        case "$1" in
+            --restore) (( $# >= 2 )) || die "$usage"; latest="$2.log"; shift 2 ;;
+            --issue) issue=1; shift ;;
+            --json) json=1; shift ;;
+            -*) die "$usage" ;;
+            *) [[ -z "$out" ]] || die "$usage"; out="$1"; shift ;;
+        esac
+    done
+    if [[ -n "$latest" ]]; then
+        # A name from `restores --json`, never a path: it is joined below.
+        [[ "${latest%.log}" =~ ^[0-9]{8}-[0-9]{6}-[a-z]+(-[0-9]+)?$ ]] \
+            || die "not a restore name: ${latest%.log}"
+        [[ -f "$STATE_DIR/restores/$latest" ]] || die "no restore named ${latest%.log}"
+    fi
+    out="${out:-$STATE_DIR/reports/$(date +%Y%m%d-%H%M%S)}"
     [[ -e "$out" ]] && die "$out already exists -- refusing to write into it"
     mkdir -p -m 700 "$out" || die "cannot create $out"
-    local latest="" f
-    if [[ -d "$STATE_DIR/restores" ]]; then
+    if [[ -z "$latest" && -d "$STATE_DIR/restores" ]]; then
         # The log written last, not the last name: a `manual` and an `app`
         # restore in the same second sort by trigger (lib/restore_log.py by_age).
         latest="$(find "$STATE_DIR/restores" -maxdepth 1 -type f -name '*.log' -printf '%T@ %f\n' \
@@ -1378,7 +1406,7 @@ cmd_report() {
     fi
     if [[ -n "$latest" ]]; then
         local stem="${latest%.log}"
-        for f in "$stem.log" "$stem.session.toml" "$stem.titles.json"; do
+        for f in "$stem.log" "$stem.session.toml" "$stem.titles.json" "$stem.result.json"; do
             [[ -f "$STATE_DIR/restores/$f" ]] && cp -- "$STATE_DIR/restores/$f" "$out/"
         done
     elif [[ -f "$STATE_DIR/last-restore.log" ]]; then
@@ -1398,16 +1426,41 @@ cmd_report() {
         journal_excerpt 5 --user -b -1 -g 'omarchy-system-(shutdown|reboot|logout)'
         journal_excerpt 15 -b -1 -u systemd-logind
     } >"$out/journal.txt"
+    local url="" issue_error=""
+    if (( issue )); then
+        if [[ -z "$latest" ]]; then
+            issue_error="no restore log kept yet"
+        elif ! url="$(python3 "$LIB/restore_log.py" issue "$STATE_DIR" "${latest%.log}" "$out" \
+                     2>"$out/issue-error.txt")"; then
+            url=""
+            issue_error="$(tail -n 1 "$out/issue-error.txt" 2>/dev/null)"
+            issue_error="${issue_error:-the bug report could not be prepared}"
+        fi
+        rm -f -- "$out/issue-error.txt"
+        if [[ -n "$issue_error" ]]; then
+            err "bug report not prepared: $issue_error"
+        fi
+    fi
     chmod 600 "$out"/* 2>/dev/null || true
+    if (( json )); then
+        jq -n --arg dir "$out" --arg restore "${latest%.log}" --arg url "$url" \
+            --arg issueError "$issue_error" \
+            '{dir: $dir, restore: $restore, url: $url, issueError: $issueError}'
+        return 0
+    fi
     say "report written to $out"
     if [[ -n "$latest" ]]; then
         say "restore: $latest"
     else
         err "no restore log kept yet -- only restores from this version on are kept"
     fi
+    if [[ -n "$url" ]]; then
+        say "bug report: read $out/issue.md, then open this link to file it:"
+        printf '%s\n' "$url"
+    fi
 }
 
-usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
     save)      shift; cmd_save "$@" ;;
@@ -1421,6 +1474,7 @@ case "${1:-}" in
     install)   shift; cmd_install "$@" ;;
     uninstall) shift; cmd_uninstall "$@" ;;
     config)    shift; cmd_config "$@" ;;
+    restores)  shift; cmd_restores "$@" ;;
     report)    shift; cmd_report "$@" ;;
     -h|--help|help|"") usage ;;
     *) err "unknown command: $1"; usage; exit 1 ;;

@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -443,6 +444,276 @@ class Report(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             logs = list(out.glob("*.log"))
             self.assertEqual([p.read_text() for p in logs], ["second\n"])
+
+
+LOG = """Restore started 2026-11-01 15:16:33 -03
+trigger: login
+restoring 4 window(s) from /x/last.toml
+
+[browser] google-chrome: 2 window(s) in 1 profile(s) -- requesting their saved sessions
+  Default: exit_type=Crashed exited_cleanly=False
+  Default: Sessions: Session_1 (979000 B, 10-31 13:50:09)
+  Default: windows in the newest session: 1
+  ! extra blank browser window: 0x1
+[3/4] foot: restored → ws2  (cwd {home}/Devs/x; no program saved)
+[4/4] foot: no window after 30s  (no cwd saved; runs btop)
+
+3/4 placed in 12s
+windows actually on screen: 3
+
+previous boot: last entry 2026-10-31 13:50:09 -0300
+  omarchy menu: 2026-10-31T13:50:07 omarchy-system-shutdown --inhibit
+  logind: 2026-10-31T13:50:09 The system will power off now!
+"""
+
+
+class Summary(unittest.TestCase):
+    def summary(self, text=LOG, rc=2):
+        return restore_log.summarize(text.format(home=Path.home()), rc, "login", NOW, NOW + 40)
+
+    def test_the_outcome_and_the_lines_worth_reading_first(self) -> None:
+        got = self.summary()
+        self.assertEqual((got["result"], got["placed"], got["total"]), ("partial", 3, 4))
+        self.assertEqual(got["problems"], ["! extra blank browser window: 0x1",
+                                           "[4/4] foot: no window after 30s  (no cwd saved; runs btop)"])
+        self.assertIn("Default: windows in the newest session: 1", got["notes"])
+        self.assertIn("omarchy menu: 2026-10-31T13:50:07 omarchy-system-shutdown --inhibit",
+                      got["notes"])
+        self.assertIn("terminals: 2, 1 with no program saved, 0 whose folder is gone, "
+                      "1 with no folder saved", got["notes"])
+        # The session file listing is long and lives in the log.
+        self.assertFalse(any("Sessions:" in n for n in got["notes"]))
+
+    def test_each_way_a_restore_can_end(self) -> None:
+        self.assertEqual(self.summary(rc=None)["result"], "interrupted")
+        self.assertEqual(self.summary(rc=1)["result"], "failed")
+        self.assertEqual(self.summary(rc=0)["result"], "ok")
+        self.assertEqual(self.summary("trigger: login\nnothing to restore\n", rc=1)["result"],
+                         "nothing")
+
+    def test_a_second_chrome_profile_is_read_too(self) -> None:
+        # Review omasession-51: "Profile 1" has a space and was skipped.
+        got = self.summary("  Profile 1: exit_type=Crashed exited_cleanly=False\n", rc=0)
+        self.assertEqual(got["notes"], ["Profile 1: exit_type=Crashed exited_cleanly=False"])
+
+    def test_a_capped_note_list_is_not_called_a_title_leak(self) -> None:
+        notes = self.summary("".join(f"  P{i}: exit_type=Normal exited_cleanly=True\n"
+                                     for i in range(20)), rc=0)["notes"]
+        _problems, kept, left_out = restore_log._shareable([], notes)
+        self.assertEqual((left_out, kept[-1]), (0, "… and 9 more in the log"))
+
+    def test_a_session_that_could_not_be_read_failed(self) -> None:
+        # Review omasession-50 (rev-1): a broken last.toml with no usable
+        # previous generation also prints "nothing to restore" and exits 1.
+        text = "  ! last.toml: TOML does not parse\nnothing to restore\n"
+        got = self.summary(text, rc=1)
+        self.assertEqual(got["result"], "failed")
+        self.assertEqual(got["problems"], ["! last.toml: TOML does not parse"])
+        self.assertEqual(self.summary("nothing to restore\n", rc=1)["result"], "nothing")
+
+    def test_a_crash_names_the_exception(self) -> None:
+        text = "Traceback (most recent call last):\n  File \"x\", line 1\nKeyError: 'workspace'\n"
+        self.assertEqual(self.summary(text, rc=1)["problems"], ["crashed: KeyError: 'workspace'"])
+
+    def test_a_flood_of_problems_is_capped(self) -> None:
+        text = "".join(f"[{i}/40] foot: no window after 30s\n" for i in range(1, 41))
+        problems = self.summary(text, rc=2)["problems"]
+        self.assertEqual(len(problems), restore_log.MAX_LINES)
+        self.assertEqual(problems[-1], "… and 29 more in the log")
+
+
+class Results(unittest.TestCase):
+    def test_a_finished_restore_leaves_its_result_and_pruning_takes_it_along(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            first = restore_log.RestoreLog(state, "login", now=NOW, keep=1)
+            first.publish("3/4 placed in 2s\n")
+            first.finish(2, "3/4 placed in 2s\n")
+            first.close()
+            stamp_after(state / first.name)
+            result = json.loads((state / "restores" / f"{first.stem}.result.json").read_text())
+            self.assertEqual((result["result"], result["placed"]), ("partial", 3))
+            second = restore_log.RestoreLog(state, "manual", now=NOW + 60, keep=1)
+            second.publish("x\n")
+            second.close()
+            self.assertEqual(sorted(p.name for p in (state / "restores").iterdir()),
+                             [f"{second.stem}.log"])
+
+    def run_logged(self, main) -> dict:
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(os.environ, {"XDG_STATE_HOME": tmp, "OMASESSION_RESTORE_TRIGGER": "manual"}), \
+             patch.object(replay, "main", main), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                replay.run_logged()
+            except SystemExit:
+                pass
+            found = restore_log.entries(Path(tmp) / "omasession")
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def test_a_restore_stopped_by_a_signal_is_interrupted_not_failed(self) -> None:
+        def stopped():
+            print("[1/2] foot: restored → ws1")
+            raise SystemExit(143)
+
+        self.assertEqual(self.run_logged(stopped)["result"], "interrupted")
+
+    def test_a_restore_that_crashed_says_how(self) -> None:
+        def crashed():
+            raise KeyError("workspace")
+
+        entry = self.run_logged(crashed)
+        self.assertEqual(entry["result"], "failed")
+        self.assertEqual(entry["problems"], ["crashed: KeyError: 'workspace'"])
+
+    def test_the_list_is_newest_first_and_names_unfinished_restores(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state" / "omasession"
+            done = restore_log.RestoreLog(state, "login", now=NOW)
+            done.publish("4/4 placed in 3s\n")
+            done.finish(0, "4/4 placed in 3s\n")
+            done.close()
+            stamp_after(state / done.name)
+            killed = restore_log.RestoreLog(state, "manual", now=NOW + 60)
+            killed.publish("restoring 2 window(s)\n")
+            killed.close()
+            stamp_after(state / killed.name)
+            env = {**os.environ, "XDG_STATE_HOME": str(Path(tmp) / "state"),
+                   "XDG_CONFIG_HOME": str(Path(tmp) / "config")}
+            out = subprocess.run(["bash", str(ROOT / "bin" / "omasession"), "restores", "--json"],
+                                 env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            found = json.loads(out.stdout)["restores"]
+            self.assertEqual([(e["trigger"], e["result"]) for e in found],
+                             [("manual", "unfinished"), ("login", "ok")])
+            self.assertEqual(found[1]["log"], str(state / done.name))
+
+    def test_no_restore_yet_is_an_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(restore_log.entries(Path(tmp)), [])
+
+
+class Issue(unittest.TestCase):
+    ENTRY = {"trigger": "login", "result": "partial", "placed": 3, "total": 4, "started": NOW,
+             "problems": [f"[4/4] foot: no window after 30s  (cwd {Path.home()}/Devs/x; runs btop)"],
+             "notes": ["Default: windows in the newest session: 1"]}
+
+    def test_the_link_carries_the_outcome_with_the_home_folder_hidden(self) -> None:
+        url, body = restore_log.issue(self.ENTRY, "0.6.0",
+                                      f"{Path.home()}/.local/state/omasession/reports/r")
+        self.assertTrue(url.startswith(restore_log.ISSUES_URL + "?title=Login%20restore"))
+        self.assertIn("omasession 0.6.0, login restore at", body)
+        self.assertIn("result: partial (3/4 placed)", body)
+        self.assertIn("cwd ~/Devs/x", body)
+        self.assertIn("`~/.local/state/omasession/reports/r`", body)
+        self.assertNotIn(str(Path.home()), body)
+
+    def test_a_long_report_still_fits_in_a_link(self) -> None:
+        entry = {**self.ENTRY,
+                 "problems": [f"[{i}/12] foot: no window after 30s  (cwd ~/{'x' * 600})" for i in range(12)],
+                 "notes": ["terminals: " + "y" * 600] * 12}
+        url, body = restore_log.issue(entry, "0.6.0", "/r")
+        self.assertLessEqual(len(url), restore_log.MAX_URL)
+        self.assertIn("more in the log", body)
+
+    def test_window_titles_never_reach_the_issue(self) -> None:
+        # Review omasession-50: four replay lines end with a browser window's
+        # title, and the whole problem list used to go into the issue.
+        titled = ["! leaving unmatched blank browser window SECRET-TITLE",
+                  "! extra blank browser window: SECRET-TITLE",
+                  "! leaving unmatched live browser window SECRET-TITLE - Gmail",
+                  "! extra window the browser reopened: SECRET-TITLE - Google Docs",
+                  "! some line the replay prints in a later version SECRET-TITLE"]
+        entry = {**self.ENTRY, "problems": [*titled, "! google-chrome reopened nothing",
+                                            "crashed: KeyError: 'SECRET-TITLE'"]}
+        url, body = restore_log.issue(entry, "0.6.0", "/r")
+        self.assertNotIn("SECRET-TITLE", body)
+        self.assertNotIn("SECRET-TITLE", unquote(url))
+        self.assertIn("! google-chrome reopened nothing", body)
+        self.assertIn("crashed: KeyError\n", body)
+        # The diagnosis stays; a line the issue does not know is only counted.
+        self.assertIn("! extra window the browser reopened: <title left out>", body)
+        self.assertIn("! leaving unmatched live browser window <title left out>", body)
+        self.assertIn("1 other flagged line(s) are only in the log", body)
+
+    def test_notes_keep_their_facts_without_the_machine_name(self) -> None:
+        entry = {**self.ENTRY, "problems": [], "notes": [
+            "Profile 1: exit_type=Crashed exited_cleanly=False",
+            "previous boot: last entry 2026-10-31 13:50:09 -0300",
+            "omarchy menu: 2026-10-31T13:50:07-0300 SECRET-HOST omarchy-system-shutdown[812]: --inhibit",
+            "logind: no shutdown request (crash or power loss?)",
+            "previous boot: unexpected journal line 'SECRET-HOST x'"]}
+        _url, body = restore_log.issue(entry, "0.6.0", "/r")
+        self.assertNotIn("SECRET-HOST", body)
+        self.assertIn("Profile 1: exit_type=Crashed exited_cleanly=False", body)
+        self.assertIn("omarchy menu: 2026-10-31T13:50:07-0300 omarchy-system-shutdown[812]: --inhibit", body)
+        self.assertIn("logind: no shutdown request (crash or power loss?)", body)
+        self.assertIn("1 other flagged line(s)", body)
+
+class ReportIssue(unittest.TestCase):
+    def run_report(self, tmp: Path, *args: str, hook_text: str = "") -> subprocess.CompletedProcess:
+        hook = tmp / "journal.sh"
+        hook.write_text("journalctl() { return 1; }\n" + hook_text)
+        env = {**os.environ, "BASH_ENV": str(hook), "XDG_STATE_HOME": str(tmp / "state"),
+               "XDG_CONFIG_HOME": str(tmp / "config")}
+        return subprocess.run(["bash", str(ROOT / "bin" / "omasession"), "report", *args],
+                              env=env, capture_output=True, text=True, timeout=60)
+
+    def test_the_chosen_restore_is_bundled_with_a_bug_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            state = tmp / "state" / "omasession"
+            stems = []
+            for trigger, rc in (("login", 2), ("manual", 0)):
+                log = restore_log.RestoreLog(state, trigger, now=NOW)
+                log.publish(f"{trigger}\n")
+                log.finish(rc, f"{trigger}\n")
+                log.close()
+                stamp_after(state / log.name)
+                stems.append(log.stem)
+            out = tmp / "report"
+            result = self.run_report(tmp, "--restore", stems[0], "--issue", "--json", str(out))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            answer = json.loads(result.stdout)
+            self.assertEqual((answer["dir"], answer["restore"]), (str(out), stems[0]))
+            self.assertIn("title=Login%20restore%3A%20partial", answer["url"])
+            self.assertEqual([p.read_text() for p in out.glob("*.log")], ["login\n"])
+            self.assertIn("result: partial", (out / "issue.md").read_text())
+            self.assertTrue((out / f"{stems[0]}.result.json").exists())
+
+    def test_a_bug_report_that_cannot_be_prepared_says_so(self) -> None:
+        # Review omasession-50: the panel showed "Report written" and no issue
+        # opened, because the failure only went to stderr with exit 0.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            state = tmp / "state" / "omasession"
+            log = restore_log.RestoreLog(state, "login", now=NOW)
+            log.publish("x\n")
+            log.finish(2, "x\n")
+            log.close()
+            failing = ('python3() { if [[ "$2" == issue ]]; then echo "boom: disk full" >&2; return 1; fi; '
+                       'command python3 "$@"; }\n')
+            out = tmp / "report"
+            result = self.run_report(tmp, "--restore", log.stem, "--issue", "--json", str(out),
+                                     hook_text=failing)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            answer = json.loads(result.stdout)
+            self.assertEqual((answer["url"], answer["issueError"]), ("", "boom: disk full"))
+            self.assertFalse((out / "issue-error.txt").exists())
+
+    def test_no_restore_yet_is_an_issue_error_not_silence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_report(Path(tmp), "--issue", "--json", str(Path(tmp) / "r"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["issueError"], "no restore log kept yet")
+
+    def test_a_name_that_is_a_path_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_report(Path(tmp), "--restore", "../../x", str(Path(tmp) / "r"))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not a restore name", result.stderr)
+            self.assertFalse((Path(tmp) / "r").exists())
 
 
 if __name__ == "__main__":

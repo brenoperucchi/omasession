@@ -3,6 +3,9 @@
 #
 #   ./shoot.sh healthy|refused [crop]
 #
+# OMASESSION_SHOT_VIEW=windows|layout|saved|apps|log abre o painel nessa aba;
+# OMASESSION_SHOT_MOCK=false usa o que o guest tem de verdade (restores reais).
+#
 # Saida em $OMASESSION_SHOT_DIR (default: um mktemp -d, cujo caminho e impresso).
 # Iterar o Panel.qml na maquina de trabalho e o que docs/DESIGN.md 6 proibe:
 # um erro em QML derruba a barra, o dock e o menu de uma vez.
@@ -28,17 +31,20 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # desabilitados, indefinidamente, ate alguem notar e reinstalar na mao.
 ORIG_SCEN=$(sed -n 's/.*property string scenario: "\([a-z]*\)".*/\1/p' Panel.qml | head -1)
 ORIG_MOCK=$(sed -n 's/.*property bool mockMode: \(true\|false\).*/\1/p' Panel.qml | head -1)
+ORIG_VIEW=$(sed -n 's/.*property string view: "\([a-z]*\)".*/\1/p' Panel.qml | head -1)
 set_panel() {
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$1" "$2" "$3" <<'PY'
 import re,sys
 p='Panel.qml'; s=open(p,encoding='utf-8').read()
 s=re.sub(r'property string scenario: "\w+"', f'property string scenario: "{sys.argv[1]}"', s)
 s=re.sub(r'property bool mockMode: (true|false)', f'property bool mockMode: {sys.argv[2]}', s)
+s=re.sub(r'property string view: "\w+"', f'property string view: "{sys.argv[3]}"', s)
 open(p,'w',encoding='utf-8').write(s)
 PY
 }
 restore_panel() {
-  [ -n "$ORIG_SCEN" ] && [ -n "$ORIG_MOCK" ] && set_panel "$ORIG_SCEN" "$ORIG_MOCK"
+  [ -n "$ORIG_SCEN" ] && [ -n "$ORIG_MOCK" ] && [ -n "$ORIG_VIEW" ] \
+    && set_panel "$ORIG_SCEN" "$ORIG_MOCK" "$ORIG_VIEW"
   # Sem isto o guest ficava preso no cenario fixo da ultima captura pra
   # sempre: restaurava o arquivo local (o repo), nunca reenviava a versao de
   # producao de volta pro guest. Medido: o painel real la parou de refletir
@@ -53,7 +59,7 @@ restore_panel() {
 }
 trap restore_panel EXIT
 
-set_panel "$SCEN" true
+set_panel "$SCEN" "${OMASESSION_SHOT_MOCK:-true}" "${OMASESSION_SHOT_VIEW:-$ORIG_VIEW}"
 scp -q -P 2223 -i "$L/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$L/known_hosts" \
   Panel.qml omatest@127.0.0.1:.config/omarchy/plugins/brenoperucchi.omasession/Panel.qml || exit 1
@@ -61,7 +67,9 @@ scp -q -P 2223 -i "$L/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
 ssh_ 'export XDG_RUNTIME_DIR=/run/user/1000; export WAYLAND_DISPLAY=wayland-1
 pkill -x quickshell; sleep 9
 Q=$(pgrep -x quickshell | head -1); [ -n "$Q" ] || { echo "quickshell nao respawnou"; exit 1; }
-export $(tr "\0" "\n" < /proc/$Q/environ | grep -E "^OMARCHY_PATH=" | xargs)
+export $(tr "\0" "\n" < /proc/$Q/environ | grep -E "^(OMARCHY_PATH|HYPRLAND_INSTANCE_SIGNATURE)=" | xargs)
+# O cursor fica onde a sessao anterior o deixou, as vezes em cima do painel.
+hyprctl dispatch "hl.dsp.cursor.move({x=300, y=700})" >/dev/null 2>&1
 timeout 10 omarchy-shell brenoperucchi.omasession open >/dev/null 2>&1
 sleep 3
 timeout 15 grim /tmp/shot.png && echo "grim ok"' || exit 1
@@ -69,6 +77,7 @@ timeout 15 grim /tmp/shot.png && echo "grim ok"' || exit 1
 scp -q -P 2223 -i "$L/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$L/known_hosts" \
   omatest@127.0.0.1:/tmp/shot.png "$SCRATCH/raw-$SCEN.png" || exit 1
+OUT="$SCRATCH/panel-$SCEN${OMASESSION_SHOT_VIEW:+-$OMASESSION_SHOT_VIEW}.png"
 ffmpeg -y -loglevel error -i "$SCRATCH/raw-$SCEN.png" \
-  -vf "crop=$CROP,scale=1400:-1:flags=lanczos" "$SCRATCH/panel-$SCEN.png"
-echo "pronto: $SCRATCH/panel-$SCEN.png"
+  -vf "crop=$CROP,scale=1400:-1:flags=lanczos" "$OUT"
+echo "pronto: $OUT"

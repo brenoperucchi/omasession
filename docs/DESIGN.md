@@ -200,8 +200,8 @@ disable only Chrome's automatic repair while leaving the other browsers on.
 
 ### 5.2 Explicit Chrome repair
 
-The panel exposes a labeled **Google Chrome** action in a separate “Restore App
-Windows” section below the session summary. Its compact unlabeled toggle controls
+The panel exposes a labeled **Google Chrome** action in the **Apps** tab below
+the session summary. Its compact unlabeled toggle controls
 `browserRepairChrome`; the button calls `omasession restore-app google-chrome`,
 which filters the saved replay to Chrome, asks Chrome to restore its own windows
 and tabs, and then applies the saved workspace placement. When Chrome is already
