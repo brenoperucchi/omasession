@@ -4,6 +4,11 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
+## Unreleased
+
+- Saves leave out omasnap's screenshot preview and a nested Hyprland's window.
+  Before, a preview open during a save was relaunched at login.
+
 ## 0.6.0 — 2026-11-02
 
 - Each restore keeps its own log in `~/.local/state/omasession/restores/`
