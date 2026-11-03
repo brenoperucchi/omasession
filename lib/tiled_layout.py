@@ -157,7 +157,7 @@ def rectangle(position, size, pad):
 
 def verify(tree, ws, pad):
     current = [w for w in query("clients") if w.get("mapped") and
-               str(w["workspace"]["id"]) == str(ws) and not w.get("floating")]
+               str(w.get("workspace", {}).get("id", "")) == str(ws) and not w.get("floating")]
     expected_addresses = set(projected_rects(tree, (0, 0, 1, 1)))
     if {w["address"] for w in current} != expected_addresses:
         return False
@@ -209,7 +209,7 @@ def restore_tiled(specs, hypr, encode):
             workspace = workspaces.get(ws, {})
             if workspace.get("tiledLayout") != "dwindle":
                 raise ValueError("not a Dwindle workspace")
-            live = [w for w in query("clients") if w.get("mapped") and str(w["workspace"]["id"]) == ws]
+            live = [w for w in query("clients") if w.get("mapped") and str(w.get("workspace", {}).get("id", "")) == ws]
             tiled = [w for w in live if not w.get("floating")]
             addresses = {w["_restored_address"] for w in windows}
             if {w["address"] for w in tiled} != addresses:
