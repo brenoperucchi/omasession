@@ -35,6 +35,17 @@ class ReplayCases(unittest.TestCase):
         self.assertEqual(matches[0]["workspace"], "3")
         self.assertEqual(remaining, [])
 
+    def test_a_window_on_the_staging_workspace_is_not_mapped(self) -> None:
+        # Hyprland 0.57 leaves "id" out for a special workspace.
+        staged = {"address": "0xa", "mapped": True,
+                  "workspace": {"address": "special:omasession-restore",
+                                "type": "special", "name": "special:omasession-restore"}}
+        placed = {"address": "0xb", "mapped": True,
+                  "workspace": {"address": "2", "id": 2, "type": "normal", "name": "2"}}
+
+        with patch.object(replay, "clients", return_value=[staged, placed]):
+            self.assertEqual(replay.mapped(), [placed])
+
 
 class RepairBrowserSession(unittest.TestCase):
     """The session repair of docs/plans/008 never costs the rest of the restore."""

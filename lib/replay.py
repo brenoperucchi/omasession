@@ -232,7 +232,10 @@ def clients() -> list[dict]:
 
 
 def mapped() -> list[dict]:
-    return [c for c in clients() if c.get("mapped") and c["workspace"]["id"] > 0]
+    # Hyprland 0.57 leaves "id" out for a workspace without a number, such as
+    # the special staging workspace; 0.56 gave those a negative id.
+    return [c for c in clients()
+            if c.get("mapped") and c.get("workspace", {}).get("id", 0) > 0]
 
 
 def find_new(known: set[str], timeout: float, app: str | None = None):
