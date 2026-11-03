@@ -4,10 +4,15 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
-## Unreleased
+## 0.6.1 — 2026-11-03
 
+- A restore on Hyprland 0.57 no longer stops after the browsers. 0.57 leaves
+  the workspace number out of a window parked on the restore's staging
+  workspace, and the restore crashed on that window, so no terminal or other
+  app was opened. Thanks to @dmkenney (#10).
 - Saves leave out omasnap's screenshot preview and a nested Hyprland's window.
-  Before, a preview open during a save was relaunched at login.
+  Before, a preview open during a save was relaunched at login. Thanks to
+  @dmkenney (#11).
 
 ## 0.6.0 — 2026-11-02
 
