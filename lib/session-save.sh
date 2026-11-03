@@ -210,6 +210,19 @@ if [[ "$NAME" == "last" && "${OMASESSION_BROWSER_REPAIR:-true}" != "false" ]]; t
     fi
 fi
 
+# Temporary windows that relaunch to nothing useful: omasnap's screenshot
+# preview and a nested Hyprland's window (aquamarine). Filtered out of the one
+# reading that the guard, the capture and the titles all use, so they still
+# agree on what is on screen.
+if ! clients="$(jq '
+        ["omasnap", "aquamarine"] as $temporary
+        | map(select(((.class // "") as $c | $temporary | index([$c])) == null
+                     and ((.initialClass // "") as $c | $temporary | index([$c])) == null))
+        ' <<<"$clients")"; then
+    err "cannot filter hyprctl clients -- session left untouched"
+    exit 3
+fi
+
 # Special workspaces (scratchpad) have negative ids and are excluded here, as
 # they are in the replay: neither side can place them. A desktop whose windows
 # are all scratchpadded therefore looks empty to this script, and the floor rule
