@@ -51,9 +51,12 @@ Desde 2026-11-02 tudo o que vem depois do resumo fica em abas:
    guardados, do mais novo para o mais antigo, com o placar de cada um. O
    aberto mostra os problemas em vermelho e o contexto em cinza, com **Open
    log** e **Report a problem**. Este chama `omasession report --restore
-   <nome> --issue --json` e abre a pasta e o link da issue com `xdg-open`, por
-   `Util.execArgv`, sem passar o caminho por um shell. A aba ganha um ponto
-   quando o último restore teve problema.
+   <nome> --issue --json` e mostra no painel o título e o texto que a issue
+   levaria, sem abrir nada. O link só abre no botão **Open on GitHub**, e o
+   painel avisa que abrir o link já entrega o texto ao GitHub e ao histórico do
+   navegador, antes do envio. **Open folder** abre a pasta do relatório. Os dois
+   usam `xdg-open` por `Util.execArgv`, sem passar o caminho por um shell. A aba
+   ganha um ponto quando o último restore teve problema.
 5. A cadência (`Snapshot every Ns`) fica no rodapé fixo e compacto.
 
 O corpo único evita scrolls aninhados: em telas pequenas, resumo, ação do

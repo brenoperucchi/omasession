@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -605,13 +605,14 @@ class Issue(unittest.TestCase):
         self.assertTrue(url.startswith(restore_log.ISSUES_URL + "?title=Login%20restore"))
         self.assertIn("omasession 0.6.0, login restore at", body)
         self.assertIn("result: partial (3/4 placed)", body)
-        self.assertIn("cwd ~/Devs/x", body)
+        self.assertIn("[4/4] foot: no window after 30s  (folder left out; program left out)", body)
         self.assertIn("`~/.local/state/omasession/reports/r`", body)
         self.assertNotIn(str(Path.home()), body)
 
     def test_a_long_report_still_fits_in_a_link(self) -> None:
         entry = {**self.ENTRY,
-                 "problems": [f"[{i}/12] foot: no window after 30s  (cwd ~/{'x' * 600})" for i in range(12)],
+                 "problems": [f"[{i}/300] foot: no window after 30s  (cwd ~/x; runs btop)"
+                              for i in range(300)],
                  "notes": ["terminals: " + "y" * 600] * 12}
         url, body = restore_log.issue(entry, "0.6.0", "/r")
         self.assertLessEqual(len(url), restore_log.MAX_URL)
@@ -637,6 +638,49 @@ class Issue(unittest.TestCase):
         self.assertIn("! leaving unmatched live browser window <title left out>", body)
         self.assertIn("1 other flagged line(s) are only in the log", body)
 
+    def test_folders_never_reach_the_issue(self) -> None:
+        # Marketplace review (omarchy-plugin-marketplace#13759): a failed
+        # terminal's line ends with the folder it was saved in, and the issue
+        # link used to carry it with only the home folder written as ~.
+        private = "acme-private-x"
+        home = str(Path.home())
+        entry = {**self.ENTRY, "problems": [
+            f"[1/5] foot: no window after 30s  (cwd {home}/Devs/{private}; runs btop)",
+            f"[2/5] ghostty: no window after 30s  (cwd /srv/{private} (gone); no program saved)",
+            f"[3/5] kitty: no window after 30s  (no cwd saved; runs {home}/{private}/bin/tool)",
+            f"[5/5] foot: no window after 30s  (cwd ~/x; runs deploy-{private})",
+            "[4/5] alacritty: no window after 30s",
+            f"! could not arm google-chrome profile: [Errno 13] Permission denied: '{home}/{private}/x'",
+            f"! could not keep a copy of {private}.toml: [Errno 2] No such file: '/{private}'",
+            "! could not keep a copy of last.titles.json: [Errno 2] No such file",
+        ], "notes": [f"terminals: 3, 1 with no program saved, 1 whose folder is gone, 1 with no folder saved",
+                     f"terminals: 1 in {private}",
+                     f"Default: windows in the newest session: 1 {private}",
+                     # Review omasession-53: a session the person named, and
+                     # the free text after a journal line's unit.
+                     f"fallback: {private}.toml was not a consistent pair",
+                     "fallback: last.prev.toml was not a consistent pair",
+                     f"omarchy menu: 2026-11-01T10:00:00-03:00 host app[1]: ran /home/u/{private}/omarchy-system-shutdown",
+                     f"logind: 2026-11-01T10:00:02-03:00 host systemd-logind[9]: poweroff requested from client PID 7 ('{private}') (unit user@1000.service)..."]}
+        url, body = restore_log.issue(entry, "0.6.1", f"{home}/.local/state/omasession/reports/r")
+        self.assertNotIn(private, body)
+        self.assertNotIn(private, unquote(url))
+        # The diagnosis stays: which terminal, whether its folder was saved or
+        # gone, and whether a program was saved, without naming either.
+        self.assertIn("[1/5] foot: no window after 30s  (folder left out; program left out)", body)
+        self.assertIn("[2/5] ghostty: no window after 30s  (folder left out, gone; no program saved)", body)
+        self.assertIn("[3/5] kitty: no window after 30s  (no cwd saved; program left out)", body)
+        self.assertIn("[4/5] alacritty: no window after 30s\n", body)
+        self.assertIn("! could not arm google-chrome profile: <details left out>", body)
+        self.assertIn("! could not keep a copy of <session file>: <details left out>", body)
+        self.assertIn("! could not keep a copy of last.titles.json: <details left out>", body)
+        self.assertIn("fallback: <session file> was not a consistent pair", body)
+        self.assertIn("fallback: last.prev.toml was not a consistent pair", body)
+        self.assertIn("omarchy menu: 2026-11-01T10:00:00-03:00 omarchy-system-shutdown\n", body)
+        self.assertIn("logind: 2026-11-01T10:00:02-03:00 poweroff requested\n", body)
+        self.assertIn("terminals: 3, 1 with no program saved, 1 whose folder is gone, 1 with no folder saved", body)
+        self.assertIn("2 other flagged line(s)", body)
+
     def test_notes_keep_their_facts_without_the_machine_name(self) -> None:
         entry = {**self.ENTRY, "problems": [], "notes": [
             "Profile 1: exit_type=Crashed exited_cleanly=False",
@@ -647,7 +691,7 @@ class Issue(unittest.TestCase):
         _url, body = restore_log.issue(entry, "0.6.0", "/r")
         self.assertNotIn("SECRET-HOST", body)
         self.assertIn("Profile 1: exit_type=Crashed exited_cleanly=False", body)
-        self.assertIn("omarchy menu: 2026-10-31T13:50:07-0300 omarchy-system-shutdown[812]: --inhibit", body)
+        self.assertIn("omarchy menu: 2026-10-31T13:50:07-0300 omarchy-system-shutdown\n", body)
         self.assertIn("logind: no shutdown request (crash or power loss?)", body)
         self.assertIn("1 other flagged line(s)", body)
 
@@ -681,6 +725,10 @@ class ReportIssue(unittest.TestCase):
             self.assertEqual([p.read_text() for p in out.glob("*.log")], ["login\n"])
             self.assertIn("result: partial", (out / "issue.md").read_text())
             self.assertTrue((out / f"{stems[0]}.result.json").exists())
+            # The panel shows this draft before anything opens the link, so it
+            # must be exactly the text the link carries.
+            self.assertEqual(answer["body"], (out / "issue.md").read_text())
+            self.assertIn("&body=" + quote(answer["body"], safe=""), answer["url"])
 
     def test_a_bug_report_that_cannot_be_prepared_says_so(self) -> None:
         # Review omasession-50: the panel showed "Report written" and no issue

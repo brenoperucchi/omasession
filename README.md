@@ -147,8 +147,13 @@ back, with **Save now** and **Restore session**. Below that are five tabs:
   with no program saved, and how the previous boot went down. When the latest
   restore had problems, the tab gets a dot and the header says so. **Open
   log** shows the whole log. **Report a problem** gathers it with
-  `omasession report`, opens the folder, and opens a new GitHub issue with the
-  outcome filled in. Nothing is sent until you submit the issue yourself.
+  `omasession report` and shows, in the panel, the title and text the GitHub
+  issue would start with. Nothing leaves your machine until you press **Open on
+  GitHub**. That opens a new-issue link carrying the title and text, so GitHub
+  and your browser history get them at that point, before you submit. The
+  text holds the version, the outcome and the flagged lines, with window titles
+  and folders left out. **Open folder** shows the full report, which stays on
+  your machine.
 
 A window counts as placed even when it comes back empty, such as a Chrome
 window without its tabs, so every restore in the Log tab can be reported, not
@@ -263,9 +268,9 @@ the journal recorded it. When a restore comes back wrong, `omasession report`
 copies that log, the session, the state files and the matching journal lines
 into one folder. The folder holds window titles and folder names, so read it
 before you share it. With `--issue` it also writes `issue.md` there and prints
-a link to a new GitHub issue that carries the restore's outcome and its
-flagged lines, with window titles left out and your home folder written as
-`~`.
+a link to a new GitHub issue that carries the same text: the restore's outcome
+and its flagged lines, with window titles and folders left out. Opening the
+link hands that text to GitHub, so read `issue.md` first.
 
 ## Configure
 

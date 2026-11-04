@@ -194,6 +194,13 @@ Panel {
   property string logSelected: ""      // the restore whose lines are open
   property string reportMessage: ""
   property bool reportFailed: false
+  // A gathered report waiting for the person: the folder, and the issue link
+  // with the draft it carries. Nothing opens until they press a button, since
+  // opening the link already hands its text to GitHub and the browser history.
+  property string reportDir: ""
+  property string reportUrl: ""
+  property string reportDraft: ""
+  property string reportTitle: ""
   readonly property var mockRestores: [
     { "name": "20261101-151633-login", "trigger": "login", "result": "partial",
       "started": 1793556993, "placed": 5, "total": 7, "log": "",
@@ -239,10 +246,24 @@ Panel {
   }
   function reportRestore(name) {
     if (mockMode || reportProc.running) return
+    clearReport()
     reportFailed = false
     reportMessage = "Gathering the log, the session and the journal…"
     reportProc.command = [root.cliPath, "report", "--restore", name, "--issue", "--json"]
     reportProc.running = true
+  }
+  function clearReport() {
+    reportMessage = ""
+    reportDir = ""
+    reportUrl = ""
+    reportDraft = ""
+    reportTitle = ""
+  }
+  // The title the link carries, decoded from the link itself.
+  function issueTitle(url) {
+    var m = /[?&]title=([^&]*)/.exec(url)
+    if (!m) return ""
+    try { return decodeURIComponent(m[1]) } catch (e) { return "" }
   }
   // xdg-open through Omarchy's argv helper, so a path is never re-read by a shell.
   function openPath(path) {
@@ -281,15 +302,17 @@ Panel {
         root.reportMessage = lines[lines.length - 1] || ("report failed (exit " + code + ")")
         return
       }
-      root.openPath(answer.dir)
+      root.reportDir = answer.dir
       if (!answer.url) {
         root.reportFailed = answer.issueError !== undefined && answer.issueError !== ""
         root.reportMessage = "Report written to " + answer.dir
                              + (root.reportFailed ? ", but the issue link failed: " + answer.issueError : "")
       } else {
-        root.openPath(answer.url)
-        root.reportMessage = "The issue opened in your browser and the files in "
-                             + answer.dir + ". Read both before you send it."
+        root.reportUrl = answer.url
+        root.reportTitle = root.issueTitle(answer.url)
+        root.reportDraft = String(answer.body || "")
+        root.reportMessage = "Report written to " + answer.dir
+                             + ". Below is the GitHub issue it would start, word for word."
       }
     }
   }
@@ -1494,6 +1517,93 @@ Panel {
                 color: root.reportFailed ? Color.urgent : root.dim
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
+              }
+
+              // The issue draft, shown before anything leaves the machine.
+              Rectangle {
+                visible: root.reportUrl !== ""
+                width: parent.width
+                height: draftCol.implicitHeight + Style.space(12)
+                radius: Style.space(3)
+                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+                border.width: 1
+                border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.14)
+
+                Column {
+                  id: draftCol
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.margins: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.spacing.xs
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    text: "Nothing has left this machine yet. Open on GitHub, at the end, puts the "
+                          + "title and text below in the link it opens, so GitHub and your browser "
+                          + "history get them before you submit. It holds the version, the outcome and "
+                          + "the flagged lines, with window titles and folders left out. The log and "
+                          + "the session copy stay in the folder."
+                    color: root.fg
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: root.reportTitle
+                    color: root.fg
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: root.reportDraft
+                    color: root.dim
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                  Row {
+                    spacing: Style.spacing.sm
+                    Button {
+                      text: "Open on GitHub"
+                      bordered: true
+                      focusable: true
+                      onClicked: {
+                        root.openPath(root.reportUrl)
+                        var dir = root.reportDir
+                        root.clearReport()
+                        root.reportDir = dir
+                        root.reportMessage = "Opened on GitHub. Nothing is posted until you submit it there."
+                      }
+                    }
+                    Button {
+                      text: "Open folder"
+                      bordered: true
+                      focusable: true
+                      onClicked: root.openPath(root.reportDir)
+                    }
+                    Button {
+                      text: "Cancel"
+                      bordered: true
+                      focusable: true
+                      onClicked: root.clearReport()
+                    }
+                  }
+                }
+              }
+
+              Button {
+                visible: root.reportDir !== "" && root.reportUrl === ""
+                text: "Open report folder"
+                bordered: true
+                focusable: true
+                onClicked: root.openPath(root.reportDir)
               }
 
               Repeater {

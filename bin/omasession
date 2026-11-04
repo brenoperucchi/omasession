@@ -1443,9 +1443,14 @@ cmd_report() {
     fi
     chmod 600 "$out"/* 2>/dev/null || true
     if (( json )); then
+        # body is the draft the link carries: the panel shows it and opens the
+        # link only when the person asks, since opening it already hands the
+        # text to GitHub and the browser history.
+        local body=""
+        [[ -n "$url" && -f "$out/issue.md" ]] && body="$(cat -- "$out/issue.md"; printf x)" && body="${body%x}"
         jq -n --arg dir "$out" --arg restore "${latest%.log}" --arg url "$url" \
-            --arg issueError "$issue_error" \
-            '{dir: $dir, restore: $restore, url: $url, issueError: $issueError}'
+            --arg issueError "$issue_error" --arg body "$body" \
+            '{dir: $dir, restore: $restore, url: $url, issueError: $issueError, body: $body}'
         return 0
     fi
     say "report written to $out"

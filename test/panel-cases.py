@@ -107,5 +107,24 @@ class PanelCases(unittest.TestCase):
         self.assertLess(source.index('!root.restoreOnLogin ? "RESTORE ON LOGIN IS OFF"'),
                         source.index('root.lastRestoreBad ? "LAST RESTORE HAD PROBLEMS"'))
 
+    def test_the_issue_link_opens_only_after_the_person_confirms(self) -> None:
+        # Marketplace review (omarchy-plugin-marketplace#13759): Report a
+        # problem opened the prefilled link at once, so GitHub and the browser
+        # history got its text before the person had read it.
+        source = PANEL.read_text(encoding="utf-8")
+        exited = re.search(r"id:\s*reportProc\b.*?onExited: function\(code\) \{(?P<body>.*?)\n    \}\n",
+                           source, re.DOTALL)
+        self.assertIsNotNone(exited)
+        self.assertNotIn("openPath(", exited.group("body"))
+        self.assertIn("root.reportDraft = ", exited.group("body"))
+        # The draft is on screen, says what opening sends, and the link opens
+        # from one button only.
+        self.assertIn("text: root.reportDraft", source)
+        self.assertIn("before you submit", source)
+        self.assertEqual(source.count("root.openPath(root.reportUrl)"), 1)
+        confirm = re.search(r'text: "Open on GitHub"(?P<body>.*?)\n\s*\}', source, re.DOTALL)
+        self.assertIsNotNone(confirm)
+        self.assertIn("root.openPath(root.reportUrl)", confirm.group("body"))
+
 if __name__ == "__main__":
     unittest.main()

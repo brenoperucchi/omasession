@@ -455,42 +455,99 @@ def _redact(line: str) -> str:
 
 # What a bug report may carry. The panel shows every flagged line, but some of
 # them end with a browser window's title ("! extra window the browser
-# reopened: <title>"), so the issue takes only the formats known to hold none
-# and counts the rest. A new `! ...` line in the replay stays out until it is
-# added here on purpose.
+# reopened: <title>") or a folder ("(cwd ~/Devs/<project>; runs btop)"), so the
+# issue takes only the formats known to hold neither, rewrites the few whose
+# diagnosis is worth keeping, and counts the rest. Every pattern is anchored at
+# both ends: a new `! ...` line in the replay, or a longer form of a known one,
+# stays out until it is added here on purpose.
 SHAREABLE_PROBLEMS = (
-    re.compile(r"^\[\d+/\d+\] \S+: no window after \d+s"),
     re.compile(r"^! \S+ reopened nothing$"),
     re.compile(r"^! no profile for \S+, falling back to per-window launch$"),
-    re.compile(r"^! could not arm \S+ profile: "),
-    re.compile(r"^! \S+ is running; not touching its Preferences\."),
-    re.compile(r"^! could not keep a copy of \S+: "),
+    re.compile(r"^! \S+ is running; not touching its Preferences\. "
+               r"Close it first or its tabs will not come back\.$"),
     re.compile(r"^… and \d+ more in the log$"),
 )
 SHAREABLE_NOTES = (
     # A profile folder name ("Default", "Profile 1"), then a fixed format.
-    re.compile(r"^[^:]+: (exit_type=\S+ exited_cleanly=\S+|windows in the newest session: .*)$"),
-    re.compile(r"^terminals: "),
-    re.compile(r"^fallback: \S+ was not a consistent pair$"),
+    re.compile(r"^[^:]+: (exit_type=\S+ exited_cleanly=\S+"
+               r"|windows in the newest session: (\d+|unreadable \(\w+\)))$"),
+    re.compile(r"^terminals: \d+, \d+ with no program saved, \d+ whose folder is gone, "
+               r"\d+ with no folder saved$"),
     re.compile(r"^previous boot: (last entry .*|no entries|journal unreadable|gave up after \d+s)$"),
-    re.compile(r"^(nothing to restore|no saved windows for \S+)"),
+    re.compile(r"^(nothing to restore(: all saved windows excluded by appRestoreGhostty=false)?"
+               r"|no saved windows for \S+)$"),
     re.compile(r"^… and \d+ more in the log$"),
 )
 # Replay lines that end with a browser window's title: the diagnosis is kept,
 # the title is not.
 TITLED_PROBLEMS = re.compile(r"^(! (?:leaving unmatched (?:blank|live) browser window"
                              r"|extra blank browser window:|extra window the browser reopened:)) .*$")
-# A journal line names the machine: "<time> <host> <unit>[pid]: <message>".
+# Replay lines that end with an error message, which can name any file: the
+# step that failed is kept, the message is not.
+ARM_ERROR = re.compile(r"^(! could not arm \S+ profile): .*$")
+COPY_ERROR = re.compile(r"^! could not keep a copy of ([^:]+): .*$")
+FALLBACK_NOTE = re.compile(r"^fallback: (\S+) was not a consistent pair$")
+# A session file keeps its name in the issue only when it is the default one:
+# `omasession restore <name>` replays a session the person named, and that
+# name can be a project's or a customer's.
+DEFAULT_SESSION_FILE = re.compile(r"^last(\.prev)?\.(toml|titles\.json)$")
+# A terminal that never opened: "[i/n] app: no window after Ns", then what the
+# save recorded for it, "(cwd <folder>[ (gone)]; runs <program>)" or "(no cwd
+# saved; no program saved)". The folder and the program are left out, since
+# either can name a project or a customer; whether each was saved stays.
+TERMINAL_PROBLEM = re.compile(r"^(\[\d+/\d+\] \S+: no window after \d+s)(?:  \((.*)\))?$")
+# A journal line names the machine and then carries free text: "<time> <host>
+# <unit>[pid]: <message>". The issue keeps the time and what the search
+# matched, never the rest.
 JOURNAL_NOTE = re.compile(r"^(omarchy menu|logind): (\d{4}-\d\d-\d\dT\S+) \S+ (.*)$")
+JOURNAL_MATCH = {
+    "omarchy menu": re.compile(r"omarchy-system-(shutdown|reboot|logout)"),
+    "logind": re.compile(r"(poweroff|reboot|halt) requested|Power key"),
+}
+# What the same two notes say when the journal had nothing to match.
+JOURNAL_EMPTY = re.compile(r"^(omarchy menu|logind): (no record|no entries|journal unreadable"
+                           r"|gave up after \d+s|no shutdown request \(crash or power loss\?\))$")
+
+
+def _session_file(name: str) -> str:
+    return name if DEFAULT_SESSION_FILE.match(name) else "<session file>"
+
+
+def _shareable_terminal(head: str, detail: str | None) -> str:
+    """A failed terminal's line without the folder it was saved in."""
+    if detail is None:
+        return head
+    where, sep, program = detail.rpartition("; ")
+    if not sep:
+        return head
+    if where == "no cwd saved":
+        shown = where
+    elif where.startswith("cwd "):
+        shown = "folder left out" + (", gone" if where.endswith(" (gone)") else "")
+    else:
+        return head
+    if program.startswith("runs ") and program[len("runs "):]:
+        program = "program left out"
+    elif program != "no program saved":
+        return head
+    return f"{head}  ({shown}; {program})"
 
 
 def _shareable(problems: list, notes: list) -> tuple[list[str], list[str], int]:
     """The lines a bug report may carry, and how many were left out."""
     kept_problems, kept_notes, left_out = [], [], 0
     for line in map(str, problems or []):
+        terminal = TERMINAL_PROBLEM.match(line)
         if line.startswith("crashed: "):
             # The exception's message can hold anything; its type cannot.
             kept_problems.append("crashed: " + line[len("crashed: "):].split(":", 1)[0])
+        elif terminal:
+            kept_problems.append(_shareable_terminal(terminal.group(1), terminal.group(2)))
+        elif ARM_ERROR.match(line):
+            kept_problems.append(ARM_ERROR.sub(r"\1: <details left out>", line))
+        elif COPY_ERROR.match(line):
+            name = _session_file(COPY_ERROR.match(line).group(1))
+            kept_problems.append(f"! could not keep a copy of {name}: <details left out>")
         elif any(rx.match(line) for rx in SHAREABLE_PROBLEMS):
             kept_problems.append(line)
         elif TITLED_PROBLEMS.match(line):
@@ -499,10 +556,15 @@ def _shareable(problems: list, notes: list) -> tuple[list[str], list[str], int]:
             left_out += 1
     for line in map(str, notes or []):
         journal = JOURNAL_NOTE.match(line)
+        fallback = FALLBACK_NOTE.match(line)
         if journal:
-            kept_notes.append(f"{journal.group(1)}: {journal.group(2)} {journal.group(3)}")
-        elif line.startswith(("omarchy menu: ", "logind: ")) and not line[line.index(":") + 2:][:1].isdigit():
-            kept_notes.append(line)  # "no record", "journal unreadable", ...
+            found = JOURNAL_MATCH[journal.group(1)].search(journal.group(3))
+            kept_notes.append(f"{journal.group(1)}: {journal.group(2)} "
+                              + (found.group(0) if found else "<details left out>"))
+        elif JOURNAL_EMPTY.match(line):
+            kept_notes.append(line)
+        elif fallback:
+            kept_notes.append(f"fallback: {_session_file(fallback.group(1))} was not a consistent pair")
         elif any(rx.match(line) for rx in SHAREABLE_NOTES):
             kept_notes.append(line)
         else:
@@ -543,7 +605,8 @@ def issue(entry: dict, version: str, report_dir: str) -> tuple[str, str]:
             "",
             *block("Problems the restore saw", problems),
             *(block("Notes", notes) if with_notes else []),
-            *([f"{left_out} other flagged line(s) are only in the log: they can hold window titles.", ""]
+            *([f"{left_out} other flagged line(s) are only in the log: they can hold window titles "
+                "or folder names.", ""]
               if left_out else []),
             f"The full log and a copy of the session are in `{_redact(report_dir)}`. "
             "They hold window titles and folder names, so attach only what you are fine sharing.",

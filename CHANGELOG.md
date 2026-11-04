@@ -4,6 +4,18 @@ User-visible changes to OmaSession are recorded here. Marketplace verification
 is a separate process tied to the exact repository commit in its verification
 request.
 
+## 0.6.2 — 2026-11-03
+
+- **Report a problem** no longer opens the GitHub link right away. The panel
+  first shows the title and text the issue would start with, and the link
+  opens only when you press **Open on GitHub**, since opening it already hands
+  that text to GitHub and your browser history.
+- The bug report no longer carries a failed terminal's folder or program, the
+  error text of a step that failed, the name of a session you named yourself,
+  or the free text of a journal line, since any of them can name a project or
+  a file. It still says whether the folder and the program were saved, whether
+  the folder was gone, and when and how the previous boot was shut down.
+
 ## 0.6.1 — 2026-11-03
 
 - A restore on Hyprland 0.57 no longer stops after the browsers. 0.57 leaves
